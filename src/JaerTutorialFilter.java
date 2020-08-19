@@ -27,8 +27,6 @@ public class JaerTutorialFilter extends EventFilter2D implements FrameAnnotater 
         super(chip);
         setPropertyTooltip("mixingFactor", "IIR lowpass update rate");
     }
-    
-    
 
     @Override
     public EventPacket<?> filterPacket(EventPacket<?> in) {
