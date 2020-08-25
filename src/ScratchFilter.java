@@ -4,19 +4,24 @@ import net.sf.jaer.chip.AEChip;
 import net.sf.jaer.event.BasicEvent;
 import net.sf.jaer.event.EventPacket;
 import net.sf.jaer.eventprocessing.EventFilter2D;
+import net.sf.jaer.graphics.Chip2DRenderer;
+import net.sf.jaer.graphics.ChipCanvas;
 import net.sf.jaer.graphics.FrameAnnotater;
 import org.opencv.core.*;
 
+import java.awt.Point;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseListener;
 import java.util.ArrayList;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import static org.opencv.core.CvType.CV_8UC1;
 import static org.opencv.imgproc.Imgproc.*;
 
 // TODO: Implement buffering of threshold data
 
-// TODO: Implement buffering of event frame data
-// TODO: Parse event data into ArUco functions and see what the heck happens
-// TODO: Simple marker annotation at centroid
+// TODO: Simple marker annotation at centroid with shape detection
 
 // Buffer "memory" will be implemented through pixel decay
 
@@ -29,18 +34,22 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
         }
     }
 
+    private Logger logger = Logger.getLogger(this.getClass().getName());
+
     private boolean hasSaved = false;
+    private boolean addedMouseListener = false;
 
     // TODO: How do you obtain these dynamically for different devices?
     // Currently set to the DAVIS-346 dimensions
     private int CHIP_WIDTH = 346;
     private int CHIP_HEIGHT = 260;
 
-    private boolean thresholdOn = true;
-    private boolean contoursOn = true;
+    private boolean thresholdOn = false;
+    private boolean contoursOn = false;
 
     final private Mat postBuffer = new Mat(CHIP_WIDTH, CHIP_HEIGHT, CV_8UC1, new Scalar(0));
     final private Mat buffer = new Mat(CHIP_WIDTH, CHIP_HEIGHT, CV_8UC1, new Scalar(0));
+    final private ArrayList<Point> bboxPoints = new ArrayList<>();
 
     private int bufferCycleLength = 20; // for specifying whole frame retention
     private int thresh = 30; // pixel filtering threshold
@@ -169,20 +178,69 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
 
     @Override
     public void annotate(GLAutoDrawable drawable) {
+        if (!addedMouseListener) {
+            ChipCanvas theCanvas = chip.getCanvas();
+
+            if (theCanvas != null) {
+                Chip2DRenderer renderer = chip.getRenderer();
+
+                theCanvas.getCanvas().addMouseListener(new MouseListener() {
+                    @Override
+                    public void mouseClicked(MouseEvent mouseEvent) {
+                    }
+
+                    @Override
+                    public void mousePressed(MouseEvent mouseEvent) {
+                    }
+
+                    @Override
+                    public void mouseReleased(MouseEvent mouseEvent) {
+                        logger.log(Level.INFO, "Look ma, I'm pressing the mouse!");
+
+                        final Point p = theCanvas.getMousePixel();
+
+                        if (mouseEvent.getButton() == MouseEvent.BUTTON1) {
+                            renderer.setXsel((short) p.x);
+                            renderer.setYsel((short) p.y);
+
+                            bboxPoints.add(new Point(renderer.getXsel(), renderer.getYsel()));
+                            String s = "Point = " + renderer.getXsel() + " " + renderer.getYsel();
+                            logger.log(Level.INFO, s);
+                        }
+
+                    }
+
+                    @Override
+                    public void mouseEntered(MouseEvent mouseEvent) {
+
+                    }
+
+                    @Override
+                    public void mouseExited(MouseEvent mouseEvent) {
+
+                    }
+                });
+            } else {
+                // TODO: (Ivy) Log about it!!
+            }
+
+            addedMouseListener = true;
+        }
+
         GL2 gl = drawable.getGL().getGL2();
 
         gl.glPushMatrix();
 
         gl.glPointSize(ptSize);
 
-        // blank background
-        gl.glBegin(GL2.GL_QUADS);
-        gl.glColor3f(1,1, 1);
-        gl.glVertex2d(0, 0); // bottom left
-        gl.glVertex2d(0, CHIP_HEIGHT); // top left
-        gl.glVertex2d(CHIP_WIDTH, CHIP_HEIGHT); // top right
-        gl.glVertex2d(CHIP_WIDTH, 0); // bottom right
-        gl.glEnd();
+        // blank background -- drawn clockwise
+//        gl.glBegin(GL2.GL_QUADS);
+//        gl.glColor3f(1,1, 1);
+//        gl.glVertex2d(0, 0); // bottom left
+//        gl.glVertex2d(0, CHIP_HEIGHT); // top left
+//        gl.glVertex2d(CHIP_WIDTH, CHIP_HEIGHT); // top right
+//        gl.glVertex2d(CHIP_WIDTH, 0); // bottom right
+//        gl.glEnd();
 
         Mat out = buffer.clone();
         // TODO: Warn user in a tooltip that an even kdim will be converted to kdim + 1
@@ -231,7 +289,7 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
             Mat contourOut = Mat.zeros(out.size(), CV_8UC1);
             for (int i = 0; i < contours.size(); i++) {
                 // Contours currently form way too tightly around noise. Mitigate this somehow
-                drawContours(contourOut, contours, i, new Scalar(255), 1, LINE_8, hierarchy, 0, new Point());
+                drawContours(contourOut, contours, i, new Scalar(255), 1, LINE_8, hierarchy, 0, new org.opencv.core.Point());
             }
 
             for (int i = 0; i < CHIP_WIDTH; i++) {
@@ -246,6 +304,19 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
                     }
                 }
             }
+        }
+
+        gl.glEnd();
+
+        gl.glPointSize(8f);
+
+        gl.glBegin(GL2.GL_POINTS);
+
+        gl.glColor3f(0,1f,0);
+
+        for (int i = 0; i < bboxPoints.size(); i++) {
+            final Point p = bboxPoints.get(i);
+            gl.glVertex2d(p.x, p.y);
         }
 
         gl.glEnd();

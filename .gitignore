@@ -5,3 +5,5 @@
 /ivy
 /jars unused/**
 /*.log
+
+jars/opencv-native
