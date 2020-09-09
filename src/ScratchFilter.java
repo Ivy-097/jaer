@@ -1,22 +1,28 @@
 import com.jogamp.opengl.GL2;
 import com.jogamp.opengl.GLAutoDrawable;
+import eu.seebetter.ini.chips.DavisChip;
 import net.sf.jaer.chip.AEChip;
+import net.sf.jaer.event.ApsDvsEvent;
+import net.sf.jaer.event.ApsDvsEventPacket;
 import net.sf.jaer.event.BasicEvent;
 import net.sf.jaer.event.EventPacket;
 import net.sf.jaer.eventprocessing.EventFilter2D;
 import net.sf.jaer.graphics.Chip2DRenderer;
 import net.sf.jaer.graphics.ChipCanvas;
 import net.sf.jaer.graphics.FrameAnnotater;
+import org.opencv.aruco.Aruco;
+import org.opencv.aruco.Dictionary;
 import org.opencv.core.*;
 
 import java.awt.Point;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import static org.opencv.core.CvType.CV_8UC1;
+import static org.opencv.core.CvType.*;
 import static org.opencv.imgproc.Imgproc.*;
 
 // TODO: Implement buffering of threshold data
@@ -37,22 +43,29 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
 
     final private Logger logger = Logger.getLogger(this.getClass().getName());
 
+    private float biggest = 0;
+
     private boolean hasSaved = false;
     private boolean addedMouseListener = false;
 
     private int CHIP_WIDTH = 0;
     private int CHIP_HEIGHT = 0;
+    private int MAX_ADC; // Maximum intensity value for APS frames
 
     private Mat postBuffer;
     private Mat buffer;
+    private Mat apsDisplayBuffer;
     private ArrayList<Point> bboxPoints = new ArrayList<>();
 
     // Properties
 
+    // Switches
     private boolean thresholdOn = false;
     private boolean contoursOn = false;
     private boolean drawBackground = false;
+    private boolean parseApsFrames = !false;
 
+    private float threshAPS = 600; // APS frame filtering threshold
     private int bufferCycleLength = 1; // for specifying whole frame retention
     private int postbufferCycleLength = 1; // for specifying whole frame retention
     private int thresh = 30; // pixel filtering threshold
@@ -60,6 +73,14 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
     private int ptSize = 2;
     private int cannyMax = 255;
     private int cannyMin = 0;
+
+    public float getThreshAPS() {
+        return threshAPS;
+    }
+
+    public void setThreshAPS(float threshAPS) {
+        this.threshAPS = threshAPS;
+    }
 
     public void setPostbufferCycleLength(int postbufferCycleLength) {
         this.postbufferCycleLength = postbufferCycleLength;
@@ -103,11 +124,8 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
         return sigma;
     }
 
-    public void setFloatProperty(final float NewFloat) { // TODO: get this showing up in the UI
-        putFloat("sigma",NewFloat);
-        float OldValue = this.sigma;
-        this.sigma = NewFloat;
-        support.firePropertyChange("sigma",OldValue,NewFloat);
+    public void setSigma(float sigma) {
+        this.sigma = sigma;
     }
 
     public void doToggleThreshold() {
@@ -158,24 +176,50 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
     @Override
     public EventPacket<?> filterPacket(EventPacket<?> in) {
 
-        byte decayDelta = (byte) (100 / bufferCycleLength);
+        // apsDisplayBuffer.setTo(new Scalar(0));
 
-        for (int i = 0; i < CHIP_WIDTH; i++) {
-            for (int j = 0; j < CHIP_HEIGHT; j++) {
-                byte[] temp = new byte[1];
-                buffer.get(i,j,temp);
+        if (parseApsFrames) {
+            final ApsDvsEventPacket packet = (ApsDvsEventPacket) in;
 
-                if ((temp[0] & 0xFF) - decayDelta < 0) {
-                    buffer.put(i,j,0);
-                } else {
-                    buffer.put(i,j,temp[0] - decayDelta);
+            if (packet == null) {
+                return null;
+            }
+
+            if (packet.getEventClass() != ApsDvsEvent.class) {
+                logger.log(Level.SEVERE, "not an APS frame packet! actual: " + packet.getEventClass());
+            }
+
+            final Iterator it = packet.fullIterator();
+
+            while (it.hasNext()) {
+                final ApsDvsEvent ev = (ApsDvsEvent) it.next();
+                float temp = ev.getAdcSample(); // value appears to have a max value of 1000
+
+                if (ev.getReadoutType() == ApsDvsEvent.ReadoutType.SignalRead) {
+                    apsDisplayBuffer.put(ev.getX(), ev.getY(), MAX_ADC - temp);
                 }
             }
-        }
 
-        for (BasicEvent ev: in) {
-            // `byte` is interpreted as signed in Java. must use a mask for operations or accommodate
-            buffer.put(ev.getX(), ev.getY(), new byte[]{(byte) 100});
+        } else {
+            byte decayDelta = (byte) (100 / bufferCycleLength);
+
+            for (int i = 0; i < CHIP_WIDTH; i++) {
+                for (int j = 0; j < CHIP_HEIGHT; j++) {
+                    byte[] temp = new byte[1];
+                    buffer.get(i,j,temp);
+
+                    if ((temp[0] & 0xFF) - decayDelta < 0) {
+                        buffer.put(i,j,0);
+                    } else {
+                        buffer.put(i,j,temp[0] - decayDelta);
+                    }
+                }
+            }
+
+            for (BasicEvent ev: in) {
+                // `byte` is interpreted as signed in Java. must use a mask for operations or accommodate
+                buffer.put(ev.getX(), ev.getY(), new byte[]{(byte) 100});
+            }
         }
 
         return in;
@@ -190,9 +234,11 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
     public void initFilter() {
         CHIP_WIDTH = chip.getSizeX();
         CHIP_HEIGHT = chip.getSizeY();
+        MAX_ADC = ((DavisChip) chip).getMaxADC(); // TODO: replace this funny little hack
 
         buffer = new Mat(CHIP_WIDTH, CHIP_HEIGHT, CV_8UC1, new Scalar(0));
         postBuffer = new Mat(CHIP_WIDTH, CHIP_HEIGHT, CV_8UC1, new Scalar(0));
+        apsDisplayBuffer = new Mat(CHIP_WIDTH, CHIP_HEIGHT, CV_32FC1, new Scalar((0)));
 
         logger.log(Level.INFO, "width=" + CHIP_WIDTH + " height=" + CHIP_HEIGHT);
 
@@ -249,22 +295,33 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
         // TODO: Warn user in a tooltip that an even kdim will be converted to kdim + 1
         if (kdim % 2 == 0) { kdim = kdim + 1; }
         GaussianBlur(out, out, new Size(kdim,kdim), 0, 0, Core.BORDER_DEFAULT);
-        // blur(out, out, new Size(kdim,kdim)); // old blurring method
 
-        if (thresholdOn) {
-            threshold(out, out, thresh, 100, ADAPTIVE_THRESH_MEAN_C);
+        Mat myMat = new Mat();
+
+        if (!parseApsFrames) {
+            Canny(out, out, cannyMin, cannyMax); // (20,85) seems to work pretty well
         }
 
-        Canny(out, out, cannyMin, cannyMax); // (20,85) seems to work pretty well
+        Mat drawn = new Mat(apsDisplayBuffer.size(), CV_8UC1).setTo(new Scalar(0));
+        Mat apsCopy = new Mat();
+        cvtColor(apsDisplayBuffer, apsCopy, COLOR_GRAY2BGR);
 
-        /* Core ArUco detection -- Hoping that this works some day...
-        java.util.List<Mat> corners = new ArrayList<>();
-        Mat ids = new Mat();
-        Dictionary dic = Aruco.getPredefinedDictionary(Aruco.DICT_6X6_250);
-        Aruco.detectMarkers(out, dic, corners, ids);
-        Mat drawn = buffer.clone().setTo(new Scalar(0));
-        Aruco.drawDetectedMarkers(drawn, corners, ids);
-         */
+        // TODO: for some reason, this isn't working when there are three channels
+        if (thresholdOn) {
+            threshold(apsCopy, apsCopy, threshAPS, MAX_ADC, THRESH_BINARY);
+        }
+
+        apsCopy.convertTo(myMat, CV_8UC3, 255d / (double) MAX_ADC);
+
+        // Core ArUco detection -- working for APS frames
+        if (!false) {
+            java.util.List<Mat> corners = new ArrayList<>();
+            Mat ids = new Mat();
+            Dictionary dic = Aruco.getPredefinedDictionary(Aruco.DICT_6X6_1000);
+            Aruco.detectMarkers(myMat, dic, corners, ids);
+            drawn = myMat.clone().setTo(new Scalar(0));
+            Aruco.drawDetectedMarkers(myMat, corners, ids);
+        }
 
         GL2 gl = drawable.getGL().getGL2();
         gl.glPushMatrix();
@@ -281,23 +338,45 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
             gl.glEnd();
         }
 
-        gl.glBegin(GL2.GL_POINTS);
+        if (parseApsFrames) {
+            // Imgcodecs.imwrite("/tmp/funny.jpg", myMat);
+            gl.glBegin(GL2.GL_POINTS);
+            // draw APS data
+            for (int i = 0; i < CHIP_WIDTH; i++) {
+                for (int j = 0; j < CHIP_HEIGHT; j++) {
+                    byte[] temp = new byte[3];
+                    myMat.get(i,j,temp);
 
-        // draw processed event data
-        for (int i = 0; i < CHIP_WIDTH; i++) {
-            for (int j = 0; j < CHIP_HEIGHT; j++) {
-                byte[] temp = new byte[1];
-                out.get(i,j,temp);
-
-                if ((temp[0] & 0xFF) > 0) {
-                    float level = 1f;
-                    gl.glColor3f(level,0,0);
-                    gl.glVertex2d(i, j);
+                    if ((temp[0] & 0xFF) > 0 || (temp[1] & 0xFF) > 0 || (temp[2] & 0xFF) > 0) {
+                        gl.glColor3f(
+                                (temp[0] & 0xFF) / 255f,
+                                (temp[1] & 0xFF) / 255f,
+                                (temp[2] & 0xFF) / 255f
+                        );
+                        gl.glVertex2d(i, j);
+                    }
                 }
             }
+            gl.glEnd();
+        } else {
+            gl.glBegin(GL2.GL_POINTS);
+            // draw processed event data
+            for (int i = 0; i < CHIP_WIDTH; i++) {
+                for (int j = 0; j < CHIP_HEIGHT; j++) {
+                    byte[] temp = new byte[1];
+                    out.get(i,j,temp);
+
+                    if ((temp[0] & 0xFF) > 0) {
+                        float level = 1f;
+                        gl.glColor3f(level,0,0);
+                        gl.glVertex2d(i, j);
+                    }
+                }
+            }
+            gl.glEnd();
         }
 
-        gl.glEnd();
+        // draw ArUco detection info
 
         // Contours currently form way too tightly around noise. Mitigate this, or stop using it
         if (contoursOn) {
