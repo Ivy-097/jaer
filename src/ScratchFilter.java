@@ -12,9 +12,12 @@ import net.sf.jaer.graphics.ChipCanvas;
 import net.sf.jaer.graphics.FrameAnnotater;
 import org.opencv.aruco.Aruco;
 import org.opencv.aruco.Dictionary;
-import org.opencv.core.*;
+import org.opencv.core.Core;
+import org.opencv.core.Mat;
+import org.opencv.core.Scalar;
+import org.opencv.core.Size;
 
-import java.awt.Point;
+import java.awt.*;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
 import java.util.ArrayList;
@@ -26,7 +29,6 @@ import static org.opencv.core.CvType.*;
 import static org.opencv.imgproc.Imgproc.*;
 
 // TODO: Implement buffering of threshold data
-// TODO: Simple marker annotation at centroid with shape detection
 // TODO: Add joining lines to the bbox points; button that conjoins points
 // TODO: Bug -- speed of clicking influences time taken to form points; something to do with GLCanvas?
 
@@ -35,7 +37,9 @@ import static org.opencv.imgproc.Imgproc.*;
 public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
     static {
         try {
-            System.loadLibrary(Core.NATIVE_LIBRARY_NAME); // Load in the appropriate OpenCV library
+            // System.out.println("Native library name: " + Core.NATIVE_LIBRARY_NAME);
+            // System.loadLibrary(Core.NATIVE_LIBRARY_NAME); // Load in the appropriate OpenCV library
+            System.loadLibrary("opencv_java440"); // TODO: dynamically get string -- opencv_java320 is input for some reason
         } catch (UnsatisfiedLinkError e) {
             System.err.println("Native OpenCV library failed to load.\n" + e);
         }
@@ -43,9 +47,7 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
 
     final private Logger logger = Logger.getLogger(this.getClass().getName());
 
-    private float biggest = 0;
-
-    private boolean hasSaved = false;
+    // private boolean hasSaved = false; // What is this even for, again?
     private boolean addedMouseListener = false;
 
     private int CHIP_WIDTH = 0;
@@ -61,9 +63,8 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
 
     // Switches
     private boolean thresholdOn = false;
-    private boolean contoursOn = false;
     private boolean drawBackground = false;
-    private boolean parseApsFrames = !false;
+    private boolean parseApsFrames = true;
 
     private float threshAPS = 600; // APS frame filtering threshold
     private int bufferCycleLength = 1; // for specifying whole frame retention
@@ -73,6 +74,10 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
     private int ptSize = 2;
     private int cannyMax = 255;
     private int cannyMin = 0;
+
+    public void doToggleParseAPSFrames() {
+        // parseApsFrames = !parseApsFrames; // not doing anything right now; must fix or get rid of Canny first
+    }
 
     public float getThreshAPS() {
         return threshAPS;
@@ -96,10 +101,6 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
 
     public void doToggleBackground() {
         drawBackground = !drawBackground;
-    }
-
-    public void doToggleContours() {
-        contoursOn = !contoursOn;
     }
 
     public void setCannyMin(int cannyMin) {
@@ -298,7 +299,7 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
 
         Mat myMat = new Mat();
 
-        if (!parseApsFrames) {
+        if (!parseApsFrames) { // TODO: weird errors are happening here for this definition. ocv440 issue?
             Canny(out, out, cannyMin, cannyMax); // (20,85) seems to work pretty well
         }
 
@@ -314,10 +315,10 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
         apsCopy.convertTo(myMat, CV_8UC3, 255d / (double) MAX_ADC);
 
         // Core ArUco detection -- working for APS frames
-        if (!false) {
+        if (parseApsFrames) {
             java.util.List<Mat> corners = new ArrayList<>();
             Mat ids = new Mat();
-            Dictionary dic = Aruco.getPredefinedDictionary(Aruco.DICT_6X6_1000);
+            Dictionary dic = Aruco.getPredefinedDictionary(Aruco.DICT_6X6_250);
             Aruco.detectMarkers(myMat, dic, corners, ids);
             drawn = myMat.clone().setTo(new Scalar(0));
             Aruco.drawDetectedMarkers(myMat, corners, ids);
@@ -358,7 +359,7 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
                 }
             }
             gl.glEnd();
-        } else {
+        } else { // parse event data
             gl.glBegin(GL2.GL_POINTS);
             // draw processed event data
             for (int i = 0; i < CHIP_WIDTH; i++) {
@@ -376,35 +377,7 @@ public class ScratchFilter extends EventFilter2D implements FrameAnnotater {
             gl.glEnd();
         }
 
-        // draw ArUco detection info
-
-        // Contours currently form way too tightly around noise. Mitigate this, or stop using it
-        if (contoursOn) {
-            java.util.List<MatOfPoint> contours = new ArrayList<>();
-            Mat hierarchy = new Mat();
-            findContours(out, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE);
-            Mat contourOut = Mat.zeros(out.size(), CV_8UC1);
-            for (int i = 0; i < contours.size(); i++) {
-                drawContours(contourOut, contours, i, new Scalar(255), 1, LINE_8, hierarchy, 0, new org.opencv.core.Point());
-            }
-
-            gl.glBegin(GL2.GL_POINTS);
-
-            for (int i = 0; i < CHIP_WIDTH; i++) {
-                for (int j = 0; j < CHIP_HEIGHT; j++) {
-                    byte[] temp = new byte[1];
-                    contourOut.get(i,j,temp);
-
-                    if ((temp[0] & 0xFF) > 0) {
-                        float level = 1f - ((float)(temp[0] & 0xFF)) / 100f;
-                        gl.glColor3f(0,0,level);
-                        gl.glVertex2d(i, j);
-                    }
-                }
-            }
-
-            gl.glEnd();
-        }
+        // Contour detection were removed from this section
 
         // Draw the bbox points themselves
         gl.glPointSize(8f);
