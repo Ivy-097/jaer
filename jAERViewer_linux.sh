@@ -10,6 +10,7 @@
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 #DIR=`dirname "$0`
 
+# NOTE: This script has been modified for opencv-contrib development
 # TODO: We must be able to provide the compiled OpenCV library files for windows, mac, and linux
 
 java \
