@@ -1,0 +1,29 @@
+<boundingbox>
+    <objectlist>
+        <object id="0" timestamp="-2000">
+            <!-- Cute little triangle -->
+            <node>129,191</node>
+            <node>79,121</node>
+            <node>184,120</node>
+        </object>
+    </objectlist>
+    <translationlist>
+        <!--
+            If a timestamp's translation exists here, then use it.
+            For all other timestamps, linearly interpolate using
+            the previous and next (or just one, for first & last).
+        -->
+        <translation timestamp="-2000">
+                2.0,0.0,0.0,0.0;
+                0.0,1.0,0.0,0.0;
+                0.0,0.0,1.0,0.0;
+                0.0,0.0,0.0,1.0;
+        </translation>
+        <translation timestamp="0">
+                0.5,0.0,0.0,0.0;
+                0.0,1.0,0.0,0.0;
+                0.0,0.0,1.0,0.0;
+                0.0,0.0,0.0,1.0;
+        </translation>
+    </translationlist>
+</boundingbox>
