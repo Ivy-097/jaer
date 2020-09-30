@@ -11,8 +11,8 @@ import java.awt.*;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
 import java.beans.PropertyChangeEvent;
-import java.beans.PropertyChangeListener;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -32,9 +32,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     final private Logger logger = Logger.getLogger(this.getClass().getName());
 
     private final ArrayList<ArrayList<Point>> bboxList = new ArrayList<>();
-    private final ArrayList<Point> bboxPoints = new ArrayList<>();
-
-    private int currObjIndex = -1;
+    private final ArrayList<Point> currBboxPoints = new ArrayList<>();
 
     private int CHIP_WIDTH = -1;
     private int CHIP_HEIGHT = -1;
@@ -48,8 +46,26 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         super(chip);
     }
 
+    public void doSaveAsNewObject() {
+        if (currBboxPoints.size() < 3) {
+            logger.warning("Latest bbox had less than 3 points. Discarding.");
+        } else {
+            ArrayList<Point> newPoints = new ArrayList<>();
+
+            Iterator<Point> it = currBboxPoints.iterator();
+            while (it.hasNext()) {
+                newPoints.add(it.next());
+            }
+
+            bboxList.add(newPoints);
+        }
+
+        currBboxPoints.clear();
+        chip.getCanvas().paintFrame(); // force-paint the frame
+    }
+
     public void doClearBboxPoints() {
-        bboxPoints.clear();
+        bboxList.clear();
         chip.getCanvas().paintFrame(); // force-paint the frame
     }
 
@@ -60,38 +76,31 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
     @Override
     public void resetFilter() {
-        // nothing.
+        doClearBboxPoints();
+        // and eventually others
     }
 
-    // TODO: Manage multiple objects + Initial XML Parsing + Saving/Loading
+    // TODO: Initial XML Parsing + Saving/Loading
 
     @Override
     public void initFilter() {
         CHIP_WIDTH = chip.getSizeX();
         CHIP_HEIGHT = chip.getSizeY();
 
-        logger.log(Level.INFO, "width=" + CHIP_WIDTH + " height=" + CHIP_HEIGHT);
+        logger.info("width=" + CHIP_WIDTH + " height=" + CHIP_HEIGHT);
 
         ChipCanvas theCanvas = chip.getCanvas();
 
         if (theCanvas != null) {
             Chip2DRenderer renderer = chip.getRenderer();
 
-            chip.getAeViewer().getAePlayer().pausePlayAction.addPropertyChangeListener(new PropertyChangeListener() {
-                @Override
-                public void propertyChange(PropertyChangeEvent propertyChangeEvent) {
-                    PropertyChangeEvent p = propertyChangeEvent; // what a long name!
-                    logger.info(p.getPropertyName() + " " + p.getNewValue());
-
-                    if (p.getPropertyName() == "Name" &&
-                            p.getOldValue() == "Pause" &&
-                            p.getNewValue() == "Play") {
-                        /* current shape += 1-- some checks:
-                            - at least three points in the current object
-                            - ... what else?
-                         */
-                    }
-                }
+            // Pause/play detection is actually not a good way of knowing when the user wants
+            // to create an object. Good example: if they want to create multiple objects at
+            // the same timestamp, there would be no practical way of doing it.
+            // This section is still included because it may be useful later.
+            chip.getAeViewer().getAePlayer().pausePlayAction.addPropertyChangeListener(propertyChangeEvent -> {
+                PropertyChangeEvent p = propertyChangeEvent; // what a long name!
+                // logger.info(p.getPropertyName() + " " + p.getNewValue());
             });
 
             theCanvas.getCanvas().addMouseListener(new MouseListener() {
@@ -116,8 +125,8 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
                     if (mouseEvent.getButton() == MouseEvent.BUTTON1) {
                         renderer.setXsel((short) p.x);
                         renderer.setYsel((short) p.y);
-
-                        bboxPoints.add(new java.awt.Point(renderer.getXsel(), renderer.getYsel()));
+                        // get*sel() converts on-screen pixel positions to viewer positions
+                        currBboxPoints.add(new java.awt.Point(renderer.getXsel(), renderer.getYsel()));
                         chip.getCanvas().paintFrame(); // force-paint the frame
 
                         String s = "Point = " + renderer.getXsel() + " " + renderer.getYsel();
@@ -158,28 +167,50 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         gl.glPushMatrix();
 
         gl.glPointSize(8f);
-        gl.glColor3f(0,1f,0);
+        gl.glColor3f(0,0,1f);
+
+        // Draw the loop that goes through all the bbox points
+        gl.glBegin(GL2.GL_POINTS);
+        for (ArrayList<Point> pointArrayList : bboxList) {
+            for (Point p : pointArrayList) {
+                gl.glVertex2d(p.getX(), p.getY());
+            }
+        }
+        gl.glEnd();
 
         gl.glBegin(GL2.GL_POINTS);
-        for (final Point p : bboxPoints) {
-            gl.glVertex2d(p.x, p.y);
+        gl.glColor3f(0,1f,0);
+
+        for (Point p : currBboxPoints) {
+            gl.glVertex2d(p.getX(), p.getY());
         }
 
         gl.glEnd();
 
-        // Draw the loop that goes through all the bbox points
+        // Draw the loops that go through all the bbox points
         gl.glLineWidth(2f);
-        gl.glBegin(GL2.GL_LINE_LOOP);
-        for (final ArrayList<Point> points: bboxList) {
-            for (final Point p : points) {
-                gl.glVertex2d(p.x, p.y);
+        gl.glColor3f(0,0,1f);
+
+        for (final ArrayList<Point> pointArrayList : bboxList) {
+            gl.glBegin(GL2.GL_LINE_LOOP);
+            for (final Point p : pointArrayList) {
+                gl.glVertex2d(p.getX(), p.getY());
             }
+            gl.glEnd();
+        }
+
+        gl.glColor3f(0,1f,0);
+
+        gl.glBegin(GL2.GL_LINE_LOOP);
+        for (final Point p : currBboxPoints) {
+            gl.glVertex2d(p.getX(), p.getY());
         }
         gl.glEnd();
 
         // Draw the 2D centroid -- just to see what happens
         // definition: x = x_mean; y = y_mean.
         // This might become a handy result later. Implemented in getCentroid()
+        /*
         if (bboxPoints.size() >= 3) {
             Point centroid = getCentroid(bboxPoints);
             gl.glPointSize(8f);
@@ -188,6 +219,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             gl.glVertex2d(centroid.x, centroid.y);
             gl.glEnd();
         }
+         */
 
         gl.glPopMatrix();
 
