@@ -30,6 +30,7 @@ import net.sf.jaer.eventio.AEInputStream;
 import net.sf.jaer.eventprocessing.EventFilter2D;
 import net.sf.jaer.graphics.AEViewer;
 import net.sf.jaer.graphics.FrameAnnotater;
+import net.sf.jaer.util.RemoteControlCommand;
 
 /**
  * Filters noise based on Khodamoradi and Kastner 2018 IEEE emerging topics
@@ -54,12 +55,14 @@ public class OrderNBackgroundActivityFilter extends AbstractNoiseFilter implemen
 
     @Override
     public EventPacket<?> filterPacket(EventPacket<?> in) {
-        totalEventCount=0;
-        filteredOutEventCount=0;
+        totalEventCount = 0;
+        filteredOutEventCount = 0;
         for (BasicEvent e : in) {
             checkAndFilterEvent(e);
             totalEventCount++;
-            if(e.isFilteredOut()) filteredOutEventCount++;
+            if (e.isFilteredOut()) {
+                filteredOutEventCount++;
+            }
         }
 //        filteredOutEventCount=in.getFilteredOutCount();
         return in;
@@ -91,7 +94,6 @@ public class OrderNBackgroundActivityFilter extends AbstractNoiseFilter implemen
         lastYByCol = new int[sx];
         resetFilter();
     }
-
 
     private void checkAndFilterEvent(BasicEvent e) {
 
@@ -145,8 +147,11 @@ public class OrderNBackgroundActivityFilter extends AbstractNoiseFilter implemen
      * @param dtUs the dtUs to set
      */
     public void setDtUs(int dtUs) {
-        this.dtUs = dtUs;
+        int old=this.dtUs;
+        
         putInt("dtUs", dtUs);
+        getSupport().firePropertyChange("dtUs", old, dtUs);
+        this.dtUs = dtUs;
     }
 
     @Override
@@ -158,6 +163,33 @@ public class OrderNBackgroundActivityFilter extends AbstractNoiseFilter implemen
             resetFilter();
         }
 
+    }
+
+    private String USAGE = "OrderNFilter needs at least 1 arguments: noisefilter <command> <args>\nCommands are: setParameters dt xx\n";
+
+    @Override
+    public String setParameters(RemoteControlCommand command, String input) {
+        String[] tok = input.split("\\s");
+        
+        if (tok.length < 3) {
+            return USAGE;
+        }
+        try {
+            if ((tok.length - 1) % 2 == 0) {
+                for (int i = 1; i <= tok.length; i++) {
+                    if (tok[i].equals("dt")) {
+                        setDtUs(Integer.parseInt(tok[i + 1]));
+                    }                    
+                }
+                String out = "successfully set OrderNFilter parameters dt " + String.valueOf(dtUs);
+                return out;
+            } else {
+                return USAGE;
+            }
+
+        } catch (Exception e) {
+            return "IOExeption in remotecontrol " + e.toString() + "\n";
+        }
     }
 
 }

@@ -28,10 +28,7 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Date;
 import java.util.Random;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import net.sf.jaer.Description;
 import net.sf.jaer.DevelopmentStatus;
 import net.sf.jaer.chip.AEChip;
@@ -41,9 +38,13 @@ import net.sf.jaer.event.EventPacket;
 import net.sf.jaer.event.OutputEventIterator;
 import net.sf.jaer.event.PolarityEvent;
 import net.sf.jaer.eventio.AEInputStream;
+import static net.sf.jaer.eventprocessing.EventFilter.log;
+import net.sf.jaer.eventprocessing.EventFilter2D;
 import net.sf.jaer.eventprocessing.FilterChain;
 import net.sf.jaer.graphics.AEViewer;
 import net.sf.jaer.graphics.FrameAnnotater;
+import net.sf.jaer.util.RemoteControlCommand;
+import net.sf.jaer.util.RemoteControlled;
 
 /**
  * Filter for testing noise filters
@@ -52,7 +53,7 @@ import net.sf.jaer.graphics.FrameAnnotater;
  */
 @Description("Tests noise filters by injecting known noise and measuring how much signal and noise is filtered")
 @DevelopmentStatus(DevelopmentStatus.Status.InDevelopment)
-public class NoiseTesterFilter extends AbstractNoiseFilter implements FrameAnnotater {
+public class NoiseTesterFilter extends AbstractNoiseFilter implements FrameAnnotater, RemoteControlled {
 
     FilterChain chain;
     private float shotNoiseRateHz = getFloat("shotNoiseRateHz", .1f);
@@ -88,12 +89,13 @@ public class NoiseTesterFilter extends AbstractNoiseFilter implements FrameAnnot
     public enum NoiseFilter {
         BackgroundActivityFilter, SpatioTemporalCorrelationFilter, SequenceBasedFilter, OrderNBackgroundActivityFilter
     }
-    private NoiseFilter selectedNoiseFilter = NoiseFilter.valueOf(getString("nosieFilter", NoiseFilter.BackgroundActivityFilter.toString())); //default is BAF
+    private NoiseFilter selectedNoiseFilterEnum = NoiseFilter.valueOf(getString("nosieFilter", NoiseFilter.BackgroundActivityFilter.toString())); //default is BAF
 
 //    float BR = 2 * TPR * TPO / (TPR + TPO); // wish to norm to 1. if both TPR and TPO is 1. the value is 1
     public NoiseTesterFilter(AEChip chip) {
         super(chip);
         chain = new FilterChain(chip);
+
         noiseFilters = new AbstractNoiseFilter[]{new BackgroundActivityFilter(chip), new SpatioTemporalCorrelationFilter(chip), new SequenceBasedFilter(chip), new OrderNBackgroundActivityFilter((chip))};
         for (AbstractNoiseFilter n : noiseFilters) {
             chain.add(n);
@@ -102,14 +104,31 @@ public class NoiseTesterFilter extends AbstractNoiseFilter implements FrameAnnot
         setPropertyTooltip("shotNoiseRateHz", "rate per pixel of shot noise events");
         setPropertyTooltip("leakNoiseRateHz", "rate per pixel of leak noise events");
         setPropertyTooltip("csvFileName", "Enter a filename base here to open CSV output file (appending to it if it already exists)");
+        if (chip.getRemoteControl() != null) {
+            System.out.printf("add command listener\n");
+            chip.getRemoteControl().addCommandListener(this, "setNoiseFilterParameters", "set correlation time or distance.");
+        }
     }
 
     @Override
     public synchronized void setFilterEnabled(boolean yes) {
-        // don't do default of setting all enclosed filters enabled
+        filterEnabled = yes;
+        if (yes) {
+            for (EventFilter2D f : chain) {
+                if (selectedFilter != null && selectedFilter == f) {
+                    f.setFilterEnabled(yes);
+                }
+
+            }
+        } else {
+            for (EventFilter2D f : chain) {
+                f.setFilterEnabled(false);
+
+            }
+        }
     }
 
-    private void doCloseCsvFile() {
+    public void doCloseCsvFile() {
         if (csvFile != null) {
             try {
                 log.info("closing statistics output file" + csvFile);
@@ -156,7 +175,7 @@ public class NoiseTesterFilter extends AbstractNoiseFilter implements FrameAnnot
 
     @Override
     public EventPacket<?> filterPacket(EventPacket<?> in) {
-        
+
         totalEventCount = 0;
         filteredOutEventCount = 0;
 
@@ -178,8 +197,8 @@ public class NoiseTesterFilter extends AbstractNoiseFilter implements FrameAnnot
             lastE = e;
 
         }
-        
-        if(firstE==null){  // no input packet yet
+
+        if (firstE == null) {  // no input packet yet
             return in;
         }
 
@@ -233,16 +252,15 @@ public class NoiseTesterFilter extends AbstractNoiseFilter implements FrameAnnot
         accuracy = (float) ((TP + TN) * 1.0 / (TP + TN + FP + FN));
 
         BR = TPR + TPO == 0 ? 0f : (float) (2 * TPR * TPO / (TPR + TPO)); // wish to norm to 1. if both TPR and TPO is 1. the value is 1
+//        System.out.printf("shotNoiseRateHz and leakNoiseRateHz is %.2f and %.2f\n", shotNoiseRateHz, leakNoiseRateHz);
         if (csvWriter != null) {
             try {
-                csvWriter.write(String.format("%d,%d,%d,%d,%f,%f,%f\n",
-                        TP, TN, FP, FN, TPR, TNR, BR));
+                csvWriter.write(String.format("%d,%d,%d,%d,%f,%f,%f,%d\n",
+                        TP, TN, FP, FN, TPR, TNR, BR, firstE.timestamp));
             } catch (IOException e) {
                 doCloseCsvFile();
             }
         }
-//        System.out.printf("every packet is: inList: %d after add noise: %d filter's out: %d TP: %d TN: %d FP: %d FN: %d %%%3.1f %%%3.1f %%%3.1f\n", inList.size(), newInList.size(), outList.size(), TP, TN, FP, FN, 100 * TPR, 100 * TNR, 100 * BR);
-
         lastpacketE = lastE;
 
         return out;
@@ -264,7 +282,7 @@ public class NoiseTesterFilter extends AbstractNoiseFilter implements FrameAnnot
             chip.getAeViewer().getSupport().addPropertyChangeListener(AEInputStream.EVENT_REWOUND, this);
             chip.getAeViewer().getSupport().addPropertyChangeListener(AEViewer.EVENT_CHIP, this);
         }
-        setSelectedNoiseFilter(selectedNoiseFilter);
+        setSelectedNoiseFilter(selectedNoiseFilterEnum);
     }
 
     /**
@@ -285,8 +303,10 @@ public class NoiseTesterFilter extends AbstractNoiseFilter implements FrameAnnot
             log.warning("high leak rates will hang the filter and consume all memory");
             shotNoiseRateHz = 1;
         }
-        this.shotNoiseRateHz = shotNoiseRateHz;
+        
         putFloat("shotNoiseRateHz", shotNoiseRateHz);
+        getSupport().firePropertyChange("shotNoiseRateHz", this.shotNoiseRateHz, shotNoiseRateHz);
+        this.shotNoiseRateHz = shotNoiseRateHz;
     }
 
     /**
@@ -307,8 +327,10 @@ public class NoiseTesterFilter extends AbstractNoiseFilter implements FrameAnnot
             log.warning("high leak rates will hang the filter and consume all memory");
             leakNoiseRateHz = 1;
         }
-        this.leakNoiseRateHz = leakNoiseRateHz;
+        
         putFloat("leakNoiseRateHz", leakNoiseRateHz);
+        getSupport().firePropertyChange("leakNoiseRateHz", this.leakNoiseRateHz, leakNoiseRateHz);
+        this.leakNoiseRateHz = leakNoiseRateHz;
     }
 
     /**
@@ -348,7 +370,6 @@ public class NoiseTesterFilter extends AbstractNoiseFilter implements FrameAnnot
         if (lastpacketE != null) {
             lastPacketTs = lastpacketE.timestamp;
         }
-        
 
         int firstts = firstE.timestamp; // timestamp of the first event in the current packet
         int lastts = lastE.timestamp; // timestamp of the last event in the current packet
@@ -441,22 +462,52 @@ public class NoiseTesterFilter extends AbstractNoiseFilter implements FrameAnnot
      * @return the selectedNoiseFilter
      */
     public NoiseFilter getSelectedNoiseFilter() {
-        return selectedNoiseFilter;
+        return selectedNoiseFilterEnum;
     }
 
     /**
      * @param selectedNoiseFilter the selectedNoiseFilter to set
      */
     public void setSelectedNoiseFilter(NoiseFilter selectedNoiseFilter) {
-        this.selectedNoiseFilter = selectedNoiseFilter;
+        this.selectedNoiseFilterEnum = selectedNoiseFilter;
         putString("selectedNoiseFilter", selectedNoiseFilter.toString());
-        for(AbstractNoiseFilter n:noiseFilters){
-            if(n.getClass().getSimpleName().equals(selectedNoiseFilter.toString())){
+        for (AbstractNoiseFilter n : noiseFilters) {
+            if (n.getClass().getSimpleName().equals(selectedNoiseFilter.toString())) {
                 n.initFilter();
                 n.setFilterEnabled(true);
-            }else{
+                selectedFilter = n;
+            } else {
                 n.setFilterEnabled(false);
             }
+        }
+    }
+
+    private String USAGE = "Need at least 2 arguments: noisefilter <command> <args>\nCommands are: setNoiseFilterParameters <csvFilename> xx <shotNoiseRateHz> xx <leakNoiseRateHz> xx and specific to the filter\n";
+
+    @Override
+    public String processRemoteControlCommand(RemoteControlCommand command, String input) {
+        // parse command and set parameters of NoiseTesterFilter, and pass command to specific filter for further processing
+        String[] tok = input.split("\\s");
+        if (tok.length < 2) {
+            return USAGE;
+        } else {
+            for (int i = 1; i < tok.length; i++) {
+                if (tok[i].equals("csvFilename")) {
+                    setCsvFilename(tok[i + 1]);
+                }
+                else if (tok[i].equals("shotNoiseRateHz")) {
+                    setShotNoiseRateHz(Float.parseFloat(tok[i+1]));
+                    log.info(String.format("setShotNoiseRateHz %f", shotNoiseRateHz));
+                }
+                else if (tok[i].equals("leakNoiseRateHz")) {
+                    setLeakNoiseRateHz(Float.parseFloat(tok[i+1]));
+                    log.info(String.format("setLeakNoiseRateHz %f", leakNoiseRateHz));
+                }
+            }
+            log.info("Received Command:" + input);
+            String out = selectedFilter.setParameters(command, input);
+            log.info("Execute Command:" + input);
+            return out;
         }
     }
 
