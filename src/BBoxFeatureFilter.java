@@ -1,3 +1,4 @@
+import au.edu.wsu.BBoxObject;
 import com.jogamp.opengl.GL2;
 import com.jogamp.opengl.GLAutoDrawable;
 import net.sf.jaer.chip.AEChip;
@@ -6,16 +7,24 @@ import net.sf.jaer.eventprocessing.EventFilter2D;
 import net.sf.jaer.graphics.Chip2DRenderer;
 import net.sf.jaer.graphics.ChipCanvas;
 import net.sf.jaer.graphics.FrameAnnotater;
+import org.xml.sax.Attributes;
+import org.xml.sax.SAXException;
+import org.xml.sax.XMLReader;
+import org.xml.sax.helpers.DefaultHandler;
 
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.parsers.SAXParser;
+import javax.xml.parsers.SAXParserFactory;
 import java.awt.*;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
 import java.beans.PropertyChangeEvent;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+// TODO: Initial XML Parsing + Saving/Loading
+// NOTE: BBox drawing appears to be a bit shaky for now
 
 /* A class for testing and demonstrating bbox saving, loading, and transformation */
 
@@ -31,8 +40,12 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
     final private Logger logger = Logger.getLogger(this.getClass().getName());
 
-    private final ArrayList<ArrayList<Point>> bboxList = new ArrayList<>();
-    private final ArrayList<Point> currBboxPoints = new ArrayList<>();
+    private final ArrayList<BBoxObject> bboxList = new ArrayList<>();
+    private final BBoxObject currBboxPoints = new BBoxObject();
+
+    SAXParserFactory spf = SAXParserFactory.newInstance();
+    SAXParser parser = spf.newSAXParser();
+    XMLReader xmlReader = parser.getXMLReader();
 
     private int CHIP_WIDTH = -1;
     private int CHIP_HEIGHT = -1;
@@ -42,7 +55,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
      *
      * @param chip
      */
-    public BBoxFeatureFilter(AEChip chip) {
+    public BBoxFeatureFilter(AEChip chip) throws ParserConfigurationException, SAXException {
         super(chip);
     }
 
@@ -50,13 +63,9 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         if (currBboxPoints.size() < 3) {
             logger.warning("Latest bbox had less than 3 points. Discarding.");
         } else {
-            ArrayList<Point> newPoints = new ArrayList<>();
-
-            Iterator<Point> it = currBboxPoints.iterator();
-            while (it.hasNext()) {
-                newPoints.add(it.next());
-            }
-
+            BBoxObject newPoints = new BBoxObject();
+            newPoints.addAll(currBboxPoints);
+            newPoints.setTimestamp(chip.getAeViewer().getAePlayer().getTime());
             bboxList.add(newPoints);
         }
 
@@ -80,8 +89,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         // and eventually others
     }
 
-    // TODO: Initial XML Parsing + Saving/Loading
-
     @Override
     public void initFilter() {
         CHIP_WIDTH = chip.getSizeX();
@@ -89,7 +96,24 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         logger.info("width=" + CHIP_WIDTH + " height=" + CHIP_HEIGHT);
 
+        xmlReader.setContentHandler(new DefaultHandler() {
+            @Override
+            public void startElement(String uri, String localName, String qName, Attributes attributes) throws SAXException {
+                logger.info("qName: " + qName);
+            }
+
+            @Override
+            public void characters(char[] ch, int start, int length) throws SAXException {
+            }
+        });
+
         ChipCanvas theCanvas = chip.getCanvas();
+
+        try {
+            xmlReader.parse("/home/octo/IdeaProjects/jaer/froot-files/bboxprototype.xml");
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
 
         if (theCanvas != null) {
             Chip2DRenderer renderer = chip.getRenderer();
@@ -97,9 +121,14 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             // Pause/play detection is actually not a good way of knowing when the user wants
             // to create an object. Good example: if they want to create multiple objects at
             // the same timestamp, there would be no practical way of doing it.
-            // This section is still included because it may be useful later.
             chip.getAeViewer().getAePlayer().pausePlayAction.addPropertyChangeListener(propertyChangeEvent -> {
                 PropertyChangeEvent p = propertyChangeEvent; // what a long name!
+
+                // For some reason, these are only valid when they are swapped?
+                if (p.getOldValue() == "Play" && p.getNewValue() == "Pause") {
+                    currBboxPoints.clear();
+                }
+
                 // logger.info(p.getPropertyName() + " " + p.getNewValue());
             });
 
@@ -122,15 +151,23 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
                     final java.awt.Point p = theCanvas.getMousePixel();
 
-                    if (mouseEvent.getButton() == MouseEvent.BUTTON1) {
-                        renderer.setXsel((short) p.x);
-                        renderer.setYsel((short) p.y);
-                        // get*sel() converts on-screen pixel positions to viewer positions
-                        currBboxPoints.add(new java.awt.Point(renderer.getXsel(), renderer.getYsel()));
-                        chip.getCanvas().paintFrame(); // force-paint the frame
+                    switch (mouseEvent.getButton()) {
+                        case MouseEvent.BUTTON1:
+                            renderer.setXsel((short) p.x);
+                            renderer.setYsel((short) p.y);
+                            // get*sel() converts on-screen pixel positions to viewer positions
+                            currBboxPoints.add(new java.awt.Point(renderer.getXsel(), renderer.getYsel()));
+                            chip.getCanvas().paintFrame(); // force-paint the frame
 
-                        String s = "Point = " + renderer.getXsel() + " " + renderer.getYsel();
-                        logger.log(Level.INFO, s);
+                            String s = "Point = " + renderer.getXsel() + " " + renderer.getYsel();
+                            logger.log(Level.INFO, s);
+                            break;
+                        case MouseEvent.BUTTON3:
+                            if (currBboxPoints.size() > 0) {
+                                currBboxPoints.remove(currBboxPoints.size() - 1);
+                                chip.getCanvas().paintFrame(); // force-paint the frame
+                            }
+                            break;
                     }
                 }
 
@@ -163,16 +200,22 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
     @Override
     public void annotate(GLAutoDrawable drawable) {
+        int ts = chip.getAeViewer().getAePlayer().getTime();
+
         GL2 gl = drawable.getGL().getGL2();
         gl.glPushMatrix();
 
         gl.glPointSize(8f);
         gl.glColor3f(0,0,1f);
 
-        // Draw the loop that goes through all the bbox points
+        // Draw the bbox points of each object
         gl.glBegin(GL2.GL_POINTS);
-        for (ArrayList<Point> pointArrayList : bboxList) {
-            for (Point p : pointArrayList) {
+        for (BBoxObject obj : bboxList) {
+            if (obj.getTimestamp() > ts) {
+                continue; // bbox doesn't exist yet
+            }
+
+            for (Point p : obj) {
                 gl.glVertex2d(p.getX(), p.getY());
             }
         }
@@ -191,9 +234,14 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         gl.glLineWidth(2f);
         gl.glColor3f(0,0,1f);
 
-        for (final ArrayList<Point> pointArrayList : bboxList) {
+        for (final BBoxObject obj : bboxList) {
+            if (obj.getTimestamp() > ts) {
+                continue; // bbox doesn't exist yet
+            }
+
             gl.glBegin(GL2.GL_LINE_LOOP);
-            for (final Point p : pointArrayList) {
+
+            for (final Point p : obj) {
                 gl.glVertex2d(p.getX(), p.getY());
             }
             gl.glEnd();
