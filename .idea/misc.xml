@@ -11,7 +11,7 @@
     <option name="ivyLogLevelThreshold" value="Info" />
     <option name="ivySettingsFile" value="$PROJECT_DIR$/ivysettings.xml" />
   </component>
-  <component name="ProjectRootManager">
+  <component name="ProjectRootManager" version="2" languageLevel="JDK_1_8" default="false" project-jdk-name="1.8" project-jdk-type="JavaSDK">
     <output url="file://$PROJECT_DIR$/classes" />
   </component>
 </project>

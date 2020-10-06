@@ -7,21 +7,29 @@ import net.sf.jaer.eventprocessing.EventFilter2D;
 import net.sf.jaer.graphics.Chip2DRenderer;
 import net.sf.jaer.graphics.ChipCanvas;
 import net.sf.jaer.graphics.FrameAnnotater;
-import org.xml.sax.Attributes;
+import org.w3c.dom.Document;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
 import org.xml.sax.SAXException;
-import org.xml.sax.XMLReader;
-import org.xml.sax.helpers.DefaultHandler;
 
+import javax.swing.*;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
-import javax.xml.parsers.SAXParser;
-import javax.xml.parsers.SAXParserFactory;
 import java.awt.*;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
 import java.beans.PropertyChangeEvent;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 // TODO: Initial XML Parsing + Saving/Loading
 // NOTE: BBox drawing appears to be a bit shaky for now
@@ -30,6 +38,7 @@ import java.util.logging.Logger;
 
 public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
+    /* Not needed, for now
     static {
         try {
             System.loadLibrary("opencv_java440"); // See `ScratchFilter.java` for static naming justification
@@ -37,15 +46,16 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             System.err.println("Native OpenCV library failed to load.\n" + e);
         }
     }
+     */
 
     final private Logger logger = Logger.getLogger(this.getClass().getName());
 
     private final ArrayList<BBoxObject> bboxList = new ArrayList<>();
     private final BBoxObject currBboxPoints = new BBoxObject();
+    private final String transform = "";
 
-    SAXParserFactory spf = SAXParserFactory.newInstance();
-    SAXParser parser = spf.newSAXParser();
-    XMLReader xmlReader = parser.getXMLReader();
+    DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+    DocumentBuilder builder = factory.newDocumentBuilder();
 
     private int CHIP_WIDTH = -1;
     private int CHIP_HEIGHT = -1;
@@ -55,7 +65,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
      *
      * @param chip
      */
-    public BBoxFeatureFilter(AEChip chip) throws ParserConfigurationException, SAXException {
+    public BBoxFeatureFilter(AEChip chip) throws ParserConfigurationException {
         super(chip);
     }
 
@@ -78,6 +88,83 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         chip.getCanvas().paintFrame(); // force-paint the frame
     }
 
+    // Probably need simple bounds checking in here some day
+    public void doOpenFrootsFile() {
+        JFileChooser chooser = new JFileChooser();
+        InputStream inputStream;
+        File file;
+
+        doClearBboxPoints();
+
+        int retVal = chooser.showOpenDialog(null);
+
+        if (retVal == JFileChooser.APPROVE_OPTION) {
+            file = chooser.getSelectedFile();
+        } else {
+            logger.warning("Selected file could not be opened!");
+            return;
+        }
+
+        try {
+            inputStream = new FileInputStream(file);
+            Document doc = builder.parse(inputStream);
+
+            NodeList objectlist = doc.getElementsByTagName("objectlist").item(0).getChildNodes();
+
+            for (int i = 0; i < objectlist.getLength(); i++) {
+                Node currentNode = objectlist.item(i);
+                NodeList children = currentNode.getChildNodes();
+
+                ArrayList<Point> pointArrayList = new ArrayList<>();
+
+                for (int objNodeIdx = 0; objNodeIdx < children.getLength(); objNodeIdx++) {
+                    Node objNode = children.item(objNodeIdx);
+
+                    if (objNode.getNodeType() != Node.ELEMENT_NODE) {
+                        continue;
+                    }
+
+                    logger.info(objNode.getTextContent());
+                    Point point = parseCoordinates(objNode.getTextContent());
+                    pointArrayList.add(point);
+                }
+
+                BBoxObject temp = new BBoxObject(384210645);
+                temp.addAll(pointArrayList);
+
+                bboxList.add(temp);
+
+                NamedNodeMap attributes = currentNode.getAttributes();
+
+                if (attributes != null) {
+                    for (int j = 0; j < attributes.getLength(); j++) {
+                        logger.info(attributes.item(j).getTextContent());
+                    }
+                }
+
+                logger.info("bboxlist len: " + bboxList.size());
+            }
+
+        } catch (IOException | SAXException e) {
+            logger.warning(e.toString());
+        }
+    }
+
+    // Doesn't validate input -- could get ugly
+    private Point parseCoordinates(String coords) {
+        Point p = new Point(-1,-1);
+
+        Pattern pattern = Pattern.compile("(\\d+)");
+        Matcher matcher = pattern.matcher(coords);
+
+        if (matcher.find())
+            p.x = Integer.parseInt(matcher.group(1));
+        if (matcher.find())
+            p.y = Integer.parseInt(matcher.group(1));
+
+        return p;
+    }
+
     @Override
     public EventPacket<?> filterPacket(EventPacket<?> in) {
         return in;
@@ -96,24 +183,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         logger.info("width=" + CHIP_WIDTH + " height=" + CHIP_HEIGHT);
 
-        xmlReader.setContentHandler(new DefaultHandler() {
-            @Override
-            public void startElement(String uri, String localName, String qName, Attributes attributes) throws SAXException {
-                logger.info("qName: " + qName);
-            }
-
-            @Override
-            public void characters(char[] ch, int start, int length) throws SAXException {
-            }
-        });
-
         ChipCanvas theCanvas = chip.getCanvas();
-
-        try {
-            xmlReader.parse("/home/octo/IdeaProjects/jaer/froot-files/bboxprototype.xml");
-        } catch (Exception ex) {
-            ex.printStackTrace();
-        }
 
         if (theCanvas != null) {
             Chip2DRenderer renderer = chip.getRenderer();
@@ -201,7 +271,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     @Override
     public void annotate(GLAutoDrawable drawable) {
         int ts = chip.getAeViewer().getAePlayer().getTime();
-
         GL2 gl = drawable.getGL().getGL2();
         gl.glPushMatrix();
 
