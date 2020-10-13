@@ -1,22 +1,34 @@
 import au.edu.wsu.BBoxObject;
 import com.jogamp.opengl.GL2;
 import com.jogamp.opengl.GLAutoDrawable;
+import eu.seebetter.ini.chips.DavisChip;
 import net.sf.jaer.chip.AEChip;
+import net.sf.jaer.event.ApsDvsEvent;
+import net.sf.jaer.event.ApsDvsEventPacket;
 import net.sf.jaer.event.EventPacket;
+import net.sf.jaer.eventprocessing.EventFilter;
 import net.sf.jaer.eventprocessing.EventFilter2D;
 import net.sf.jaer.graphics.Chip2DRenderer;
 import net.sf.jaer.graphics.ChipCanvas;
 import net.sf.jaer.graphics.FrameAnnotater;
-import org.w3c.dom.Document;
-import org.w3c.dom.NamedNodeMap;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
+import net.sf.jaer.graphics.ImageDisplay;
+import org.opencv.aruco.Aruco;
+import org.opencv.aruco.Dictionary;
+import org.opencv.core.CvType;
+import org.opencv.core.Mat;
+import org.opencv.core.Scalar;
+import org.w3c.dom.*;
 import org.xml.sax.SAXException;
 
 import javax.swing.*;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerException;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
 import java.awt.*;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
@@ -25,11 +37,19 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import static org.opencv.core.CvType.CV_8UC3;
+import static org.opencv.imgproc.Imgproc.THRESH_BINARY;
+import static org.opencv.imgproc.Imgproc.threshold;
 
 // TODO: Initial XML Parsing + Saving/Loading
 // NOTE: BBox drawing appears to be a bit shaky for now
@@ -38,7 +58,6 @@ import java.util.regex.Pattern;
 
 public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
-    /* Not needed, for now
     static {
         try {
             System.loadLibrary("opencv_java440"); // See `ScratchFilter.java` for static naming justification
@@ -46,13 +65,35 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             System.err.println("Native OpenCV library failed to load.\n" + e);
         }
     }
-     */
+
+    private static enum Extraction {
+        ResetFrame,
+        SignalFrame,
+        CDSframe
+    }
 
     final private Logger logger = Logger.getLogger(this.getClass().getName());
 
+    private JFrame apsFrame;
+    private ImageDisplay apsDisplay;
+    private float[] resetBuffer, signalBuffer; // flat-array colored representation
+
+    private float[] CDSBuffer;
+    private float CDSoffset = 500; // CDS brightness value
+    private Mat CDSMat;
+    private int MAX_ADC;
+    private float bin_thresh = 600f;
+
+    private ArrayList<Mat> corners;
+    ArrayList<double[]> centroids;
+
     private final ArrayList<BBoxObject> bboxList = new ArrayList<>();
     private final BBoxObject currBboxPoints = new BBoxObject();
-    private final String transform = "";
+    // private final Mat transform = Mat.eye(4,4, CvType.CV_8UC1); // the global transformation matrix at the current ts
+
+    // global 2D offsets
+    private int offset_x = 0;
+    private int offset_y = 0;
 
     DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
     DocumentBuilder builder = factory.newDocumentBuilder();
@@ -67,6 +108,62 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
      */
     public BBoxFeatureFilter(AEChip chip) throws ParserConfigurationException {
         super(chip);
+        apsDisplay = ImageDisplay.createOpenGLCanvas();
+        apsFrame = new JFrame("APS ArUco Detection Frame");
+        apsFrame.setPreferredSize(new Dimension(640,480));
+        apsFrame.getContentPane().add(apsDisplay, BorderLayout.CENTER);
+        apsFrame.pack();
+        apsFrame.setVisible(true);
+    }
+
+    public float getBin_thresh() {
+        return this.bin_thresh;
+    }
+
+    public void setBin_thresh(float val) {
+        this.bin_thresh = val;
+        /*
+        float oldval = this.bin_thresh;
+        putFloat("bin_thresh",val);
+        this.bin_thresh = val;
+        support.firePropertyChange("bin_thresh",oldval,val);
+         */
+    }
+
+    public float getCDSoffset() {
+        return this.CDSoffset;
+    }
+
+    public void setCDSoffset(float val) {
+        float oldval = this.CDSoffset;
+        putFloat("offset_x",val);
+        this.CDSoffset = val;
+        support.firePropertyChange("offset_x",oldval,val);
+        chip.getCanvas().paintFrame(); // force-paint the frame
+    }
+
+    public int getOffset_x() {
+        return offset_x;
+    }
+
+    public void setOffset_x(int val) {
+        int oldval = this.offset_x;
+        putInt("offset_x",val);
+        this.offset_x = val;
+        support.firePropertyChange("offset_x",oldval,val);
+        chip.getCanvas().paintFrame(); // force-paint the frame
+    }
+
+    public int getOffset_y() {
+        return offset_y;
+    }
+
+    public void setOffset_y(int val) {
+        int oldval = this.offset_y;
+        putInt("offset_y",val);
+        this.offset_y = val;
+        support.firePropertyChange("offset_y",oldval,val);
+        chip.getCanvas().paintFrame(); // force-paint the frame
     }
 
     public void doSaveAsNewObject() {
@@ -83,6 +180,27 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         chip.getCanvas().paintFrame(); // force-paint the frame
     }
 
+    public void doSaveToFile() throws TransformerException {
+        Document doc = builder.newDocument();
+        Charset charset = StandardCharsets.UTF_8;
+
+        doc.setXmlStandalone(true);
+
+        Element root = doc.createElement("bboxlist");
+        doc.appendChild(root);
+
+        Element thing = doc.createElement("objectlist");
+        root.appendChild(thing);
+
+
+        TransformerFactory transformerFactory = TransformerFactory.newInstance();
+        Transformer transformer = transformerFactory.newTransformer();
+
+        DOMSource source = new DOMSource(doc);
+        StreamResult result = new StreamResult(new File("./froot-files/target.xml"));
+        transformer.transform(source, result);
+    }
+
     public void doClearBboxPoints() {
         bboxList.clear();
         chip.getCanvas().paintFrame(); // force-paint the frame
@@ -96,6 +214,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         doClearBboxPoints();
 
+        /*
         int retVal = chooser.showOpenDialog(null);
 
         if (retVal == JFileChooser.APPROVE_OPTION) {
@@ -104,6 +223,9 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             logger.warning("Selected file could not be opened!");
             return;
         }
+        */
+
+        file = new File("./froot-files/bboxprototype.xml");
 
         try {
             inputStream = new FileInputStream(file);
@@ -112,8 +234,16 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             NodeList objectlist = doc.getElementsByTagName("objectlist").item(0).getChildNodes();
 
             for (int i = 0; i < objectlist.getLength(); i++) {
-                Node currentNode = objectlist.item(i);
-                NodeList children = currentNode.getChildNodes();
+                Node currentNode;
+                NodeList children;
+
+                currentNode = objectlist.item(i);
+
+                if (currentNode.getNodeType() != Node.ELEMENT_NODE) {
+                    continue;
+                }
+
+                children = currentNode.getChildNodes();
 
                 ArrayList<Point> pointArrayList = new ArrayList<>();
 
@@ -129,17 +259,23 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
                     pointArrayList.add(point);
                 }
 
-                BBoxObject temp = new BBoxObject(384210645);
+                BBoxObject temp = new BBoxObject();
                 temp.addAll(pointArrayList);
 
-                bboxList.add(temp);
-
+                String ts_string = "";
                 NamedNodeMap attributes = currentNode.getAttributes();
 
                 if (attributes != null) {
-                    for (int j = 0; j < attributes.getLength(); j++) {
-                        logger.info(attributes.item(j).getTextContent());
-                    }
+                    Node tsAttr = attributes.getNamedItem("timestamp");
+                    ts_string = tsAttr.getNodeValue();
+                }
+
+                if (!ts_string.equals("")) {
+                    logger.info("ts_string = " + ts_string);
+                    temp.setTimestamp(Integer.parseInt(ts_string));
+                    bboxList.add(temp);
+                } else {
+                    logger.warning("bbox object missing timestamp. discarding");
                 }
 
                 logger.info("bboxlist len: " + bboxList.size());
@@ -167,7 +303,94 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
     @Override
     public EventPacket<?> filterPacket(EventPacket<?> in) {
+        final ApsDvsEventPacket packet = (ApsDvsEventPacket) in;
+
+        if (packet.getEventClass() != ApsDvsEvent.class) {
+            return in;
+        }
+
+        apsDisplay.checkPixmapAllocation();
+
+        if (packet == null) {
+            return null;
+        }
+        if (packet.getEventClass() != ApsDvsEvent.class) {
+            EventFilter.log.warning("wrong input event class, got " + packet.getEventClass() + " but we need to have " + ApsDvsEvent.class);
+            return null;
+        }
+        final Iterator apsItr = packet.fullIterator();
+        while (apsItr.hasNext()) {
+            final ApsDvsEvent e = (ApsDvsEvent) apsItr.next();
+            if (e.isApsData()) {
+                ApsDvsEvent.ReadoutType type = e.getReadoutType();
+                final float val = e.getAdcSample();
+                final int idx = getIndex(e.getX(), e.getY());
+
+                switch (type) {
+                    case SignalRead:
+                        signalBuffer[idx] = val;
+                        break;
+                    case ResetRead:
+                    default: // FALLTHROUGH!!
+                        resetBuffer[idx] = val;
+                        break;
+                }
+
+                // TODO: the scaled value of the CDSBuffer is too low;
+                // an offset of about 500 units appears to be good.
+
+                CDSBuffer[idx] = signalBuffer[idx] - resetBuffer[idx];
+                DavisChip apsChip = (DavisChip) chip;
+                float scaled_val = (CDSBuffer[idx] + CDSoffset) / (float) MAX_ADC;
+                float inv = 1 - scaled_val;
+                float[] tempList = new float[3];
+                Arrays.fill(tempList,inv);
+                CDSMat.put(e.getX(), e.getY(), tempList);
+                // apsDisplay.setPixmapGray(e.getX(),e.getY(),scaled_val);
+            }
+        }
+
+        threshold(CDSMat, CDSMat, bin_thresh, MAX_ADC, THRESH_BINARY);
+        Mat detectionInput = CDSMat.clone();
+        detectionInput.convertTo(detectionInput, CV_8UC3);
+
+        corners = new ArrayList<>();
+        Mat ids = new Mat();
+        Dictionary dic = Aruco.getPredefinedDictionary(Aruco.DICT_6X6_250);
+        Aruco.detectMarkers(detectionInput, dic, corners, ids);
+
+        for (int i = 0; i < CHIP_WIDTH; i++) {
+            for (int j = 0; j < CHIP_HEIGHT; j++) {
+                apsDisplay.setPixmapGray(i,j,(float) CDSMat.get(i,j)[0]);
+            }
+        }
+
+        /* Doesn't apply GL changes -- needs to obtain drawable surface (?)
+        GL2 gl = apsDisplay.getGL().getGL2();
+
+        gl.glPushMatrix();
+
+        gl.glPointSize(8f);
+        gl.glColor3f(0,1f,0);
+
+        gl.glBegin(GL2.GL_POINTS);
+        for (Mat mat : corners) {
+            for (int i = 0; i < 4; ++i) {
+                gl.glVertex2d(mat.get(0, i)[0], mat.get(0,i)[1]);
+            }
+        }
+        gl.glEnd();
+
+        gl.glPopMatrix();
+        */
+
+        apsDisplay.repaint();
+
         return in;
+    }
+
+    private int getIndex(final int x, final int y) {
+        return (y * CHIP_WIDTH) + x;
     }
 
     @Override
@@ -183,6 +406,19 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         logger.info("width=" + CHIP_WIDTH + " height=" + CHIP_HEIGHT);
 
+        MAX_ADC = ((DavisChip) chip).getMaxADC();
+
+        apsDisplay.setImageSize(CHIP_WIDTH,CHIP_HEIGHT);
+
+        resetBuffer = new float[CHIP_WIDTH * CHIP_HEIGHT];
+        signalBuffer = new float[CHIP_WIDTH * CHIP_HEIGHT];
+        CDSBuffer = new float[CHIP_WIDTH * CHIP_HEIGHT];
+
+        Arrays.fill(resetBuffer, 0f);
+        Arrays.fill(signalBuffer, 0f);
+        Arrays.fill(CDSBuffer, 0f);
+        CDSMat = new Mat(CHIP_WIDTH, CHIP_HEIGHT, CvType.CV_32FC3, new Scalar(0,0,0));
+
         ChipCanvas theCanvas = chip.getCanvas();
 
         if (theCanvas != null) {
@@ -194,7 +430,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             chip.getAeViewer().getAePlayer().pausePlayAction.addPropertyChangeListener(propertyChangeEvent -> {
                 PropertyChangeEvent p = propertyChangeEvent; // what a long name!
 
-                // For some reason, these are only valid when they are swapped?
+                // For some reason, these are only valid when they are swapped? TODO: figure this out
                 if (p.getOldValue() == "Play" && p.getNewValue() == "Pause") {
                     currBboxPoints.clear();
                 }
@@ -272,7 +508,48 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     public void annotate(GLAutoDrawable drawable) {
         int ts = chip.getAeViewer().getAePlayer().getTime();
         GL2 gl = drawable.getGL().getGL2();
+
         gl.glPushMatrix();
+
+        gl.glPointSize(8f);
+        gl.glColor3f(0,1f,1f);
+
+        ArrayList<ArrayList<double[]>> auxiliary = new ArrayList<>();
+
+        for (Mat mat : corners) {
+            ArrayList<double[]> square = new ArrayList<>();
+            for (int i = 0; i < 4; ++i) {
+                double[] currentPair = mat.get(0, i);
+                // coordinates are flipped according to usual matrix addressing
+                square.add(new double[]{currentPair[1], currentPair[0]});
+            }
+            auxiliary.add(square);
+        }
+
+        double[] oldPoint = centroids.get(0);
+        centroids.clear();
+
+        for (ArrayList<double[]> square : auxiliary) {
+            double[] centroid = {0,0};
+            for (int i = 0; i < 4; ++i) {
+                double[] currentPair = square.get(i);
+                centroid[0] += currentPair[0];
+                centroid[1] += currentPair[1];
+            }
+
+            centroid[0] = centroid[0] / 4.0;
+            centroid[1] = centroid[1] / 4.0;
+
+            centroids.add(centroid);
+        }
+
+        gl.glBegin(GL2.GL_POINTS);
+
+        for (double[] point : centroids) {
+            gl.glVertex2d(point[0], point[1]);
+        }
+
+        gl.glEnd();
 
         gl.glPointSize(8f);
         gl.glColor3f(0,0,1f);
@@ -285,7 +562,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             }
 
             for (Point p : obj) {
-                gl.glVertex2d(p.getX(), p.getY());
+                gl.glVertex2d(p.getX()+offset_x, p.getY()+offset_y);
             }
         }
         gl.glEnd();
@@ -294,7 +571,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         gl.glColor3f(0,1f,0);
 
         for (Point p : currBboxPoints) {
-            gl.glVertex2d(p.getX(), p.getY());
+            gl.glVertex2d(p.getX()+offset_x, p.getY()+offset_y);
         }
 
         gl.glEnd();
@@ -311,7 +588,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             gl.glBegin(GL2.GL_LINE_LOOP);
 
             for (final Point p : obj) {
-                gl.glVertex2d(p.getX(), p.getY());
+                gl.glVertex2d(p.getX()+offset_x, p.getY()+offset_y);
             }
             gl.glEnd();
         }
@@ -320,7 +597,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         gl.glBegin(GL2.GL_LINE_LOOP);
         for (final Point p : currBboxPoints) {
-            gl.glVertex2d(p.getX(), p.getY());
+            gl.glVertex2d(p.getX() + offset_x, p.getY() + offset_y);
         }
         gl.glEnd();
 
@@ -339,6 +616,5 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
          */
 
         gl.glPopMatrix();
-
     }
 }
