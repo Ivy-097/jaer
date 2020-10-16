@@ -12,6 +12,7 @@ import net.sf.jaer.graphics.Chip2DRenderer;
 import net.sf.jaer.graphics.ChipCanvas;
 import net.sf.jaer.graphics.FrameAnnotater;
 import net.sf.jaer.graphics.ImageDisplay;
+import org.jetbrains.annotations.NotNull;
 import org.opencv.aruco.Aruco;
 import org.opencv.aruco.Dictionary;
 import org.opencv.core.CvType;
@@ -39,9 +40,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Iterator;
+import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -73,6 +72,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     }
 
     final private Logger logger = Logger.getLogger(this.getClass().getName());
+    private int tsPreviousWarning;
 
     private JFrame apsFrame;
     private ImageDisplay apsDisplay;
@@ -82,18 +82,24 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     private float CDSoffset = 500; // CDS brightness value
     private Mat CDSMat;
     private int MAX_ADC;
-    private float bin_thresh = 600f;
+    private float bin_thresh;
 
-    private ArrayList<Mat> corners;
-    ArrayList<double[]> centroids;
+    private ArrayList<Mat> corners; // list of Mats containing marker corner coords
+    private Mat ids;
+    private Map<Integer,Mat> squares;
+    private ArrayList<double[]> centroids;
+    private ArrayList<Integer> oldIDs;
 
     private final ArrayList<BBoxObject> bboxList = new ArrayList<>();
+    private final ArrayList<BBoxObject> existent = new ArrayList<>(); // display
     private final BBoxObject currBboxPoints = new BBoxObject();
     // private final Mat transform = Mat.eye(4,4, CvType.CV_8UC1); // the global transformation matrix at the current ts
 
     // global 2D offsets
-    private int offset_x = 0;
-    private int offset_y = 0;
+    Map<Integer,Point> tsToOffset = new HashMap<>();
+    int offsetX;
+    int offsetY;
+    Point prevOffset; // what?
 
     DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
     DocumentBuilder builder = factory.newDocumentBuilder();
@@ -114,6 +120,113 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         apsFrame.getContentPane().add(apsDisplay, BorderLayout.CENTER);
         apsFrame.pack();
         apsFrame.setVisible(true);
+    }
+
+    @Override
+    public void initFilter() {
+        CHIP_WIDTH = chip.getSizeX();
+        CHIP_HEIGHT = chip.getSizeY();
+
+        logger.info("width=" + CHIP_WIDTH + " height=" + CHIP_HEIGHT);
+
+        setBin_thresh(0.6f);
+
+        MAX_ADC = ((DavisChip) chip).getMaxADC();
+
+        apsDisplay.setImageSize(CHIP_WIDTH,CHIP_HEIGHT);
+
+        resetBuffer = new float[CHIP_WIDTH * CHIP_HEIGHT];
+        signalBuffer = new float[CHIP_WIDTH * CHIP_HEIGHT];
+        CDSBuffer = new float[CHIP_WIDTH * CHIP_HEIGHT];
+
+        Arrays.fill(resetBuffer, 0f);
+        Arrays.fill(signalBuffer, 0f);
+        Arrays.fill(CDSBuffer, 0f);
+        CDSMat = new Mat(CHIP_WIDTH, CHIP_HEIGHT, CvType.CV_32FC3, new Scalar(0,0,0));
+        centroids = new ArrayList<>();
+        corners = new ArrayList<>();
+        ids = new Mat();
+        oldIDs = new ArrayList<>();
+        squares = new HashMap<>();
+
+        ChipCanvas theCanvas = chip.getCanvas();
+
+        if (theCanvas != null) {
+            Chip2DRenderer renderer = chip.getRenderer();
+
+            // Pause/play detection is actually not a good way of knowing when the user wants
+            // to create an object. Good example: if they want to create multiple objects at
+            // the same timestamp, there would be no physical way to do it -- in the time it
+            // takes to press the button again, the timestamp will have changed (>1μs)
+            chip.getAeViewer().getAePlayer().pausePlayAction.addPropertyChangeListener(propertyChangeEvent -> {
+                PropertyChangeEvent p = propertyChangeEvent; // what a long name!
+
+                // For some reason, these are only valid when they are swapped? TODO: figure this out
+                if (p.getOldValue() == "Play" && p.getNewValue() == "Pause") {
+                    currBboxPoints.clear();
+                }
+
+                // logger.info(p.getPropertyName() + " " + p.getNewValue());
+            });
+
+            theCanvas.getCanvas().addMouseListener(new MouseListener() {
+                @Override
+                public void mouseClicked(MouseEvent mouseEvent) {
+                }
+
+                @Override
+                public void mousePressed(MouseEvent mouseEvent) {
+                }
+
+                @Override
+                public void mouseReleased(MouseEvent mouseEvent) {
+                    if (!chip.getAeViewer().isPaused()) {
+                        return;
+                    }
+
+                    logger.log(Level.INFO, "Look ma, I'm pressing the mouse!");
+
+                    final java.awt.Point p = theCanvas.getMousePixel();
+
+                    switch (mouseEvent.getButton()) {
+                        case MouseEvent.BUTTON1:
+                            renderer.setXsel((short) p.x);
+                            renderer.setYsel((short) p.y);
+                            // get*sel() converts on-screen pixel positions to viewer positions
+                            currBboxPoints.add(new java.awt.Point(renderer.getXsel(), renderer.getYsel()));
+                            chip.getCanvas().paintFrame(); // force-paint the frame
+
+                            String s = "Point = " + renderer.getXsel() + " " + renderer.getYsel();
+                            logger.log(Level.INFO, s);
+                            break;
+                        case MouseEvent.BUTTON3:
+                            if (currBboxPoints.size() > 0) {
+                                currBboxPoints.remove(currBboxPoints.size() - 1);
+                                chip.getCanvas().paintFrame(); // force-paint the frame
+                            }
+                            break;
+                    }
+                }
+
+                @Override
+                public void mouseEntered(MouseEvent mouseEvent) {
+                    // OPTIONAL: Probably show coordinates by drawing on the canvas or via a tooltip
+                }
+
+                @Override
+                public void mouseExited(MouseEvent mouseEvent) {
+                }
+            });
+        } else {
+            logger.log(Level.SEVERE, "Chip's returned canvas is null!");
+        }
+    }
+
+    public void doEmptyCalculatedOffsets() {
+        tsToOffset.clear();
+        // reset the reference points to the middle of the screen at the ts
+        offsetX = 0;
+        offsetY = 0;
     }
 
     public float getBin_thresh() {
@@ -139,30 +252,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         putFloat("offset_x",val);
         this.CDSoffset = val;
         support.firePropertyChange("offset_x",oldval,val);
-        chip.getCanvas().paintFrame(); // force-paint the frame
-    }
-
-    public int getOffset_x() {
-        return offset_x;
-    }
-
-    public void setOffset_x(int val) {
-        int oldval = this.offset_x;
-        putInt("offset_x",val);
-        this.offset_x = val;
-        support.firePropertyChange("offset_x",oldval,val);
-        chip.getCanvas().paintFrame(); // force-paint the frame
-    }
-
-    public int getOffset_y() {
-        return offset_y;
-    }
-
-    public void setOffset_y(int val) {
-        int oldval = this.offset_y;
-        putInt("offset_y",val);
-        this.offset_y = val;
-        support.firePropertyChange("offset_y",oldval,val);
         chip.getCanvas().paintFrame(); // force-paint the frame
     }
 
@@ -311,9 +400,11 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         apsDisplay.checkPixmapAllocation();
 
+        /* Apparently "packet" is never null
         if (packet == null) {
             return null;
         }
+        */
         if (packet.getEventClass() != ApsDvsEvent.class) {
             EventFilter.log.warning("wrong input event class, got " + packet.getEventClass() + " but we need to have " + ApsDvsEvent.class);
             return null;
@@ -355,8 +446,9 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         detectionInput.convertTo(detectionInput, CV_8UC3);
 
         corners = new ArrayList<>();
-        Mat ids = new Mat();
+        ids = new Mat();
         Dictionary dic = Aruco.getPredefinedDictionary(Aruco.DICT_6X6_250);
+        // TODO: feed this function the fp camera matrix and distortion coefficients
         Aruco.detectMarkers(detectionInput, dic, corners, ids);
 
         for (int i = 0; i < CHIP_WIDTH; i++) {
@@ -399,98 +491,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         // and eventually others
     }
 
-    @Override
-    public void initFilter() {
-        CHIP_WIDTH = chip.getSizeX();
-        CHIP_HEIGHT = chip.getSizeY();
-
-        logger.info("width=" + CHIP_WIDTH + " height=" + CHIP_HEIGHT);
-
-        MAX_ADC = ((DavisChip) chip).getMaxADC();
-
-        apsDisplay.setImageSize(CHIP_WIDTH,CHIP_HEIGHT);
-
-        resetBuffer = new float[CHIP_WIDTH * CHIP_HEIGHT];
-        signalBuffer = new float[CHIP_WIDTH * CHIP_HEIGHT];
-        CDSBuffer = new float[CHIP_WIDTH * CHIP_HEIGHT];
-
-        Arrays.fill(resetBuffer, 0f);
-        Arrays.fill(signalBuffer, 0f);
-        Arrays.fill(CDSBuffer, 0f);
-        CDSMat = new Mat(CHIP_WIDTH, CHIP_HEIGHT, CvType.CV_32FC3, new Scalar(0,0,0));
-
-        ChipCanvas theCanvas = chip.getCanvas();
-
-        if (theCanvas != null) {
-            Chip2DRenderer renderer = chip.getRenderer();
-
-            // Pause/play detection is actually not a good way of knowing when the user wants
-            // to create an object. Good example: if they want to create multiple objects at
-            // the same timestamp, there would be no practical way of doing it.
-            chip.getAeViewer().getAePlayer().pausePlayAction.addPropertyChangeListener(propertyChangeEvent -> {
-                PropertyChangeEvent p = propertyChangeEvent; // what a long name!
-
-                // For some reason, these are only valid when they are swapped? TODO: figure this out
-                if (p.getOldValue() == "Play" && p.getNewValue() == "Pause") {
-                    currBboxPoints.clear();
-                }
-
-                // logger.info(p.getPropertyName() + " " + p.getNewValue());
-            });
-
-            theCanvas.getCanvas().addMouseListener(new MouseListener() {
-                @Override
-                public void mouseClicked(MouseEvent mouseEvent) {
-                }
-
-                @Override
-                public void mousePressed(MouseEvent mouseEvent) {
-                }
-
-                @Override
-                public void mouseReleased(MouseEvent mouseEvent) {
-                    if (!chip.getAeViewer().isPaused()) {
-                        return;
-                    }
-
-                    logger.log(Level.INFO, "Look ma, I'm pressing the mouse!");
-
-                    final java.awt.Point p = theCanvas.getMousePixel();
-
-                    switch (mouseEvent.getButton()) {
-                        case MouseEvent.BUTTON1:
-                            renderer.setXsel((short) p.x);
-                            renderer.setYsel((short) p.y);
-                            // get*sel() converts on-screen pixel positions to viewer positions
-                            currBboxPoints.add(new java.awt.Point(renderer.getXsel(), renderer.getYsel()));
-                            chip.getCanvas().paintFrame(); // force-paint the frame
-
-                            String s = "Point = " + renderer.getXsel() + " " + renderer.getYsel();
-                            logger.log(Level.INFO, s);
-                            break;
-                        case MouseEvent.BUTTON3:
-                            if (currBboxPoints.size() > 0) {
-                                currBboxPoints.remove(currBboxPoints.size() - 1);
-                                chip.getCanvas().paintFrame(); // force-paint the frame
-                            }
-                            break;
-                    }
-                }
-
-                @Override
-                public void mouseEntered(MouseEvent mouseEvent) {
-                    // OPTIONAL: Probably show coordinates by drawing on the canvas or via a tooltip
-                }
-
-                @Override
-                public void mouseExited(MouseEvent mouseEvent) {
-                }
-            });
-        } else {
-            logger.log(Level.SEVERE, "Chip's returned canvas is null!");
-        }
-    }
-
     private Point getCentroid(ArrayList<Point> pointArrayList) {
         int x_acc = 0;
         int y_acc = 0;
@@ -505,7 +505,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     }
 
     @Override
-    public void annotate(GLAutoDrawable drawable) {
+    public void annotate(@NotNull GLAutoDrawable drawable) {
         int ts = chip.getAeViewer().getAePlayer().getTime();
         GL2 gl = drawable.getGL().getGL2();
 
@@ -514,39 +514,95 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         gl.glPointSize(8f);
         gl.glColor3f(0,1f,1f);
 
-        ArrayList<ArrayList<double[]>> auxiliary = new ArrayList<>();
+        // TODO: it appears that it is not possible to use ArrayList operations between glBegin() and glEnd(); most likely because of thread safety
+        // change it to Vector to see if it allows it to occur.
 
-        for (Mat mat : corners) {
-            ArrayList<double[]> square = new ArrayList<>();
-            for (int i = 0; i < 4; ++i) {
-                double[] currentPair = mat.get(0, i);
-                // coordinates are flipped according to usual matrix addressing
-                square.add(new double[]{currentPair[1], currentPair[0]});
+        Point currentOffset = new Point();
+
+        Map<Integer,Mat> oldSquares = new HashMap<>();
+
+        if (tsToOffset.containsKey(ts)) { // there is already an entry for the timestamp
+            currentOffset = tsToOffset.get(ts);
+            offsetX = currentOffset.x;
+            offsetY = currentOffset.y;
+        } else { // calculate offset and store it for this timestamp
+            if (corners != null && !corners.isEmpty()) {
+                // Hashmap only implements shallow copying, change algorithm to allow for deep copying
+                // Map<Integer,Mat> oldSquares = squares;
+
+                for (int key : squares.keySet()) {
+                    // populate the hashtable
+                    oldSquares.put(key, squares.get(key).clone());
+                }
+
+                ArrayList<Integer> idList = new ArrayList<>();
+
+                // populate the new ID list
+                for (int i = 0; i < ids.size().height; i++) {
+                    idList.add((int) ids.get(i, 0)[0]);
+                }
+
+                // if an id doesn't exist in the new list, nullify the corresponding square
+                for (int oldId : oldIDs) { // mightily inefficient
+                    if (!idList.contains(oldId)) {
+                        // logger.info(oldId + " is missing. nullifying.");
+                        // squares.put(oldId,null); // nullify but keep entry
+                        squares.remove(oldId);
+                    }
+                }
+
+                log.info("oldids: " + oldIDs.toString());
+                log.info("newids: " + idList.toString());
+
+                oldIDs = idList; // let the current ids become old
+
+                // build up the new list of squares and calculate offsets
+                for (int i = 0; i < corners.size(); i++) {
+                    Mat current = corners.get(i); // current marker square
+                    int id = idList.get(i); // corresponds with current
+                    Mat old = oldSquares.get(id);
+
+                    squares.put(id,current); // insert marker using its id
+                    // logger.info("Adding square #" + id + " to squares");
+
+                    // old == null implies new detection
+                    // squares.get(id) == null implies that a marker disappeared
+                    if (old != null && squares.get(id) != null) { // marker is not new; continuous detection
+                        currentOffset.y = (int) (current.get(0,1)[0] - old.get(0,1)[0]);
+                        currentOffset.x = (int) (current.get(0,1)[1] - old.get(0,1)[1]);
+                    } else { // no. of detected markers changed
+                        currentOffset.x = 0;
+                        currentOffset.y = 0;
+                        // logger.info("new marker detected: " + id);
+                    }
+
+                    // else, don't add the offset to the list; continue
+                    // the offset calculation will be included in the next iteration
+                }
+            } else {
+                // nothing? manage branching effects?
             }
-            auxiliary.add(square);
+
+            // log.info("Oldsquares:\n" + oldSquares.toString());
+            // log.info("Squares:\n" + squares.toString());
+
+            // mean offsets aren't very good, because the offsets can zero out where averaged
+            // get the average offsets
+
+            offsetX += currentOffset.x;
+            offsetY += currentOffset.y;
+
+            tsToOffset.put(ts,new Point(offsetX, offsetY));
         }
 
-        double[] oldPoint = centroids.get(0);
-        centroids.clear();
-
-        for (ArrayList<double[]> square : auxiliary) {
-            double[] centroid = {0,0};
-            for (int i = 0; i < 4; ++i) {
-                double[] currentPair = square.get(i);
-                centroid[0] += currentPair[0];
-                centroid[1] += currentPair[1];
-            }
-
-            centroid[0] = centroid[0] / 4.0;
-            centroid[1] = centroid[1] / 4.0;
-
-            centroids.add(centroid);
-        }
+        gl.glPointSize(8f);
+        gl.glColor3f(0,1f,1f);
 
         gl.glBegin(GL2.GL_POINTS);
 
-        for (double[] point : centroids) {
-            gl.glVertex2d(point[0], point[1]);
+        for (Mat current : corners) {
+            // coords are flipped ???
+            gl.glVertex2d(current.get(0, 1)[1], current.get(0, 1)[0]);
         }
 
         gl.glEnd();
@@ -556,22 +612,24 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         // Draw the bbox points of each object
         gl.glBegin(GL2.GL_POINTS);
+
         for (BBoxObject obj : bboxList) {
             if (obj.getTimestamp() > ts) {
                 continue; // bbox doesn't exist yet
             }
 
             for (Point p : obj) {
-                gl.glVertex2d(p.getX()+offset_x, p.getY()+offset_y);
+                gl.glVertex2d(p.getX() + offsetX, p.getY() + offsetY);
             }
         }
+
         gl.glEnd();
 
         gl.glBegin(GL2.GL_POINTS);
         gl.glColor3f(0,1f,0);
 
         for (Point p : currBboxPoints) {
-            gl.glVertex2d(p.getX()+offset_x, p.getY()+offset_y);
+            gl.glVertex2d(p.getX(), p.getY());
         }
 
         gl.glEnd();
@@ -588,7 +646,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             gl.glBegin(GL2.GL_LINE_LOOP);
 
             for (final Point p : obj) {
-                gl.glVertex2d(p.getX()+offset_x, p.getY()+offset_y);
+                gl.glVertex2d(p.getX() + offsetX, p.getY() + offsetY);
             }
             gl.glEnd();
         }
@@ -597,23 +655,9 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         gl.glBegin(GL2.GL_LINE_LOOP);
         for (final Point p : currBboxPoints) {
-            gl.glVertex2d(p.getX() + offset_x, p.getY() + offset_y);
+            gl.glVertex2d(p.getX(), p.getY());
         }
         gl.glEnd();
-
-        // Draw the 2D centroid -- just to see what happens
-        // definition: x = x_mean; y = y_mean.
-        // This might become a handy result later. Implemented in getCentroid()
-        /*
-        if (bboxPoints.size() >= 3) {
-            Point centroid = getCentroid(bboxPoints);
-            gl.glPointSize(8f);
-            gl.glColor3f(0,0,1f);
-            gl.glBegin(GL2.GL_POINTS);
-            gl.glVertex2d(centroid.x, centroid.y);
-            gl.glEnd();
-        }
-         */
 
         gl.glPopMatrix();
     }
