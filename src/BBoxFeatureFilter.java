@@ -14,6 +14,7 @@ import net.sf.jaer.graphics.FrameAnnotater;
 import net.sf.jaer.graphics.ImageDisplay;
 import org.jetbrains.annotations.NotNull;
 import org.opencv.aruco.Aruco;
+import org.opencv.aruco.DetectorParameters;
 import org.opencv.aruco.Dictionary;
 import org.opencv.core.CvType;
 import org.opencv.core.Mat;
@@ -46,6 +47,7 @@ import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static org.opencv.core.CvType.CV_64FC1;
 import static org.opencv.core.CvType.CV_8UC3;
 import static org.opencv.imgproc.Imgproc.THRESH_BINARY;
 import static org.opencv.imgproc.Imgproc.threshold;
@@ -87,11 +89,14 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     private ArrayList<Mat> corners; // list of Mats containing marker corner coords
     private Mat ids;
     private Map<Integer,Mat> squares;
+    private Map<Integer,Mat> oldSquares;
     private ArrayList<double[]> centroids;
-    private ArrayList<Integer> oldIDs;
+
+    private Mat cameraMatrix;
+    private Mat distCoeff;
 
     private final ArrayList<BBoxObject> bboxList = new ArrayList<>();
-    private final ArrayList<BBoxObject> existent = new ArrayList<>(); // display
+    private final ArrayList<BBoxObject> existent = new ArrayList<>(); // display array
     private final BBoxObject currBboxPoints = new BBoxObject();
     // private final Mat transform = Mat.eye(4,4, CvType.CV_8UC1); // the global transformation matrix at the current ts
 
@@ -99,6 +104,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     Map<Integer,Point> tsToOffset = new HashMap<>();
     int offsetX;
     int offsetY;
+    double rotation;
     Point prevOffset; // what?
 
     DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
@@ -133,6 +139,16 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         MAX_ADC = ((DavisChip) chip).getMaxADC();
 
+        cameraMatrix = new Mat(3,3,CV_64FC1);
+        cameraMatrix.put(0,0, 4.732165566055414843e+02);
+        cameraMatrix.put(0,2, 2.148958459598799777e+02);
+        cameraMatrix.put(1,1, 4.837252805142607031e+02);
+        cameraMatrix.put(1,2, 1.234739411993485589e+02);
+        cameraMatrix.put(2,2, 1.0);
+
+        double[] temp = { 2.303407800133863703e-01,-4.906656853722137335e+00,1.437253645436794387e-03,6.785196876901256752e-03,2.673068725658337286e+01 };
+        distCoeff = new Mat(1,5,CV_64FC1,new Scalar(temp));
+
         apsDisplay.setImageSize(CHIP_WIDTH,CHIP_HEIGHT);
 
         resetBuffer = new float[CHIP_WIDTH * CHIP_HEIGHT];
@@ -146,7 +162,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         centroids = new ArrayList<>();
         corners = new ArrayList<>();
         ids = new Mat();
-        oldIDs = new ArrayList<>();
         squares = new HashMap<>();
 
         ChipCanvas theCanvas = chip.getCanvas();
@@ -167,6 +182,19 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
                 }
 
                 // logger.info(p.getPropertyName() + " " + p.getNewValue());
+            });
+
+            chip.getAeViewer().addPropertyChangeListener(propertyChangeEvent -> {
+                PropertyChangeEvent p = propertyChangeEvent; // what a long name!
+
+                /*
+                if (p.getNewValue() == "true") {
+                    offsetX = 0;
+                    offsetY = 0;
+                }
+                 */
+
+                logger.info(p.getPropertyName() + " " + p.getNewValue());
             });
 
             theCanvas.getCanvas().addMouseListener(new MouseListener() {
@@ -190,9 +218,9 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
                     switch (mouseEvent.getButton()) {
                         case MouseEvent.BUTTON1:
-                            renderer.setXsel((short) p.x);
-                            renderer.setYsel((short) p.y);
-                            // get*sel() converts on-screen pixel positions to viewer positions
+                            renderer.setXsel((short)(p.x));
+                            renderer.setYsel((short)(p.y));
+                            // get{}sel() converts on-screen pixel positions to viewer positions
                             currBboxPoints.add(new java.awt.Point(renderer.getXsel(), renderer.getYsel()));
                             chip.getCanvas().paintFrame(); // force-paint the frame
 
@@ -200,10 +228,13 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
                             logger.log(Level.INFO, s);
                             break;
                         case MouseEvent.BUTTON3:
-                            if (currBboxPoints.size() > 0) {
+                            if (!currBboxPoints.isEmpty()) {
                                 currBboxPoints.remove(currBboxPoints.size() - 1);
                                 chip.getCanvas().paintFrame(); // force-paint the frame
                             }
+                            break;
+                        case MouseEvent.BUTTON2:
+                            doSaveAsNewObject();
                             break;
                     }
                 }
@@ -260,6 +291,12 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             logger.warning("Latest bbox had less than 3 points. Discarding.");
         } else {
             BBoxObject newPoints = new BBoxObject();
+            for (Point p : currBboxPoints) {
+                // negate the display offsets
+                p.x -= offsetX;
+                p.y -= offsetY;
+                newPoints.add(p);
+            }
             newPoints.addAll(currBboxPoints);
             newPoints.setTimestamp(chip.getAeViewer().getAePlayer().getTime());
             bboxList.add(newPoints);
@@ -392,7 +429,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
     @Override
     public EventPacket<?> filterPacket(EventPacket<?> in) {
-        final ApsDvsEventPacket packet = (ApsDvsEventPacket) in;
+        final ApsDvsEventPacket<?> packet = (ApsDvsEventPacket<?>) in;
 
         if (packet.getEventClass() != ApsDvsEvent.class) {
             return in;
@@ -400,16 +437,11 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         apsDisplay.checkPixmapAllocation();
 
-        /* Apparently "packet" is never null
-        if (packet == null) {
-            return null;
-        }
-        */
         if (packet.getEventClass() != ApsDvsEvent.class) {
             EventFilter.log.warning("wrong input event class, got " + packet.getEventClass() + " but we need to have " + ApsDvsEvent.class);
             return null;
         }
-        final Iterator apsItr = packet.fullIterator();
+        final Iterator<?> apsItr = packet.fullIterator();
         while (apsItr.hasNext()) {
             final ApsDvsEvent e = (ApsDvsEvent) apsItr.next();
             if (e.isApsData()) {
@@ -447,9 +479,10 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         corners = new ArrayList<>();
         ids = new Mat();
+        DetectorParameters parameters = DetectorParameters.create();
+        ArrayList<Mat> rejected = new ArrayList<>();
         Dictionary dic = Aruco.getPredefinedDictionary(Aruco.DICT_6X6_250);
-        // TODO: feed this function the fp camera matrix and distortion coefficients
-        Aruco.detectMarkers(detectionInput, dic, corners, ids);
+        Aruco.detectMarkers(detectionInput, dic, corners, ids, parameters, rejected, cameraMatrix, distCoeff);
 
         for (int i = 0; i < CHIP_WIDTH; i++) {
             for (int j = 0; j < CHIP_HEIGHT; j++) {
@@ -517,23 +550,17 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         // TODO: it appears that it is not possible to use ArrayList operations between glBegin() and glEnd(); most likely because of thread safety
         // change it to Vector to see if it allows it to occur.
 
-        Point currentOffset = new Point();
+        Point currentOffset = new Point(0,0); // containing fallback offsets
 
-        Map<Integer,Mat> oldSquares = new HashMap<>();
-
+        // TODO (BUG): By using the hashtable to store the offsets statically, the calculated values start bouncing around when markers appear into the frame
         if (tsToOffset.containsKey(ts)) { // there is already an entry for the timestamp
-            currentOffset = tsToOffset.get(ts);
-            offsetX = currentOffset.x;
-            offsetY = currentOffset.y;
+            // log.info("found stored offset at " + ts);
+            Point saved = tsToOffset.get(ts);
+            offsetX = saved.x;
+            offsetY = saved.y;
         } else { // calculate offset and store it for this timestamp
-            if (corners != null && !corners.isEmpty()) {
-                // Hashmap only implements shallow copying, change algorithm to allow for deep copying
-                // Map<Integer,Mat> oldSquares = squares;
-
-                for (int key : squares.keySet()) {
-                    // populate the hashtable
-                    oldSquares.put(key, squares.get(key).clone());
-                }
+            // log.info("no stored offset at " + ts);
+            if (corners != null && !corners.isEmpty()) { // corners is non-zero
 
                 ArrayList<Integer> idList = new ArrayList<>();
 
@@ -542,42 +569,34 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
                     idList.add((int) ids.get(i, 0)[0]);
                 }
 
-                // if an id doesn't exist in the new list, nullify the corresponding square
-                for (int oldId : oldIDs) { // mightily inefficient
-                    if (!idList.contains(oldId)) {
-                        // logger.info(oldId + " is missing. nullifying.");
-                        // squares.put(oldId,null); // nullify but keep entry
-                        squares.remove(oldId);
+                // make the list of keys
+                ArrayList<Integer> oldIds = new ArrayList<>(squares.keySet());
+
+                // if an id doesn't appear in the new list, nullify the entry in squares
+                for (int oldId : oldIds ) { // mightily inefficient
+                    if (!idList.contains(oldId)) { // a marker disappeared
+                        squares.remove(oldId); // nullify entry
                     }
                 }
 
-                log.info("oldids: " + oldIDs.toString());
-                log.info("newids: " + idList.toString());
-
-                oldIDs = idList; // let the current ids become old
-
                 // build up the new list of squares and calculate offsets
-                for (int i = 0; i < corners.size(); i++) {
+                for (int i = 0; i < idList.size(); i++) {
+                    int id = idList.get(i); // IDs have the same ordering as the markers
                     Mat current = corners.get(i); // current marker square
-                    int id = idList.get(i); // corresponds with current
-                    Mat old = oldSquares.get(id);
+                    Mat old = squares.get(id);
 
-                    squares.put(id,current); // insert marker using its id
                     // logger.info("Adding square #" + id + " to squares");
 
-                    // old == null implies new detection
-                    // squares.get(id) == null implies that a marker disappeared
-                    if (old != null && squares.get(id) != null) { // marker is not new; continuous detection
-                        currentOffset.y = (int) (current.get(0,1)[0] - old.get(0,1)[0]);
-                        currentOffset.x = (int) (current.get(0,1)[1] - old.get(0,1)[1]);
-                    } else { // no. of detected markers changed
-                        currentOffset.x = 0;
-                        currentOffset.y = 0;
-                        // logger.info("new marker detected: " + id);
+                    if (old != null) {
+                        currentOffset.x = (int)(current.get(0,1)[1] - old.get(0,1)[1]);
+                        currentOffset.y = (int)(current.get(0,1)[0] - old.get(0,1)[0]);
+                    } else {
+                        log.info("inserting new marker: id=" + id + " (" + current.get(0,1)[1] + " " + current.get(0,1)[0] + ")");
                     }
 
-                    // else, don't add the offset to the list; continue
-                    // the offset calculation will be included in the next iteration
+                    // insert marker using its id
+                    // marker will be present for the next iteration if it is currently null
+                    squares.put(id,current);
                 }
             } else {
                 // nothing? manage branching effects?
@@ -586,13 +605,17 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             // log.info("Oldsquares:\n" + oldSquares.toString());
             // log.info("Squares:\n" + squares.toString());
 
-            // mean offsets aren't very good, because the offsets can zero out where averaged
-            // get the average offsets
-
             offsetX += currentOffset.x;
             offsetY += currentOffset.y;
 
+
+            // save offsets to the hashtable
             tsToOffset.put(ts,new Point(offsetX, offsetY));
+            Point temp = new Point();
+            temp.x = tsToOffset.get(ts).x;
+            temp.y = tsToOffset.get(ts).y;
+            log.info("current offset: " + offsetX + ", " + offsetY + "\n"
+            + "saved offset: " + temp.x + ", " + temp.y);
         }
 
         gl.glPointSize(8f);
