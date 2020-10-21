@@ -1,11 +1,10 @@
 package au.edu.wsu;
 
-import java.awt.*;
 import java.util.ArrayList;
 
 // TODO: find a way to feed a constructor an ArrayList
 
-public class BBoxObject extends ArrayList<Point> {
+public class BBoxObject extends ArrayList<dblPoint> {
     private int timestamp;
 
     public BBoxObject() {
