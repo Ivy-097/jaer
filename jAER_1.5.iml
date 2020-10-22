@@ -89,7 +89,6 @@
         <SOURCES />
       </library>
     </orderEntry>
-    <orderEntry type="library" name="org.apache.ivyde.eclipse.cpcontainer.IVYDE_CONTAINER/?project=jAER_1.5&amp;ivyXmlPath=ivy.xml&amp;confs=*&amp;ivySettingsPath=ivysettings.xml&amp;loadSettingsOnDemand=false&amp;ivyUserDir=&amp;propertyFiles=" level="application" />
     <orderEntry type="module-library">
       <library name="IvyIDEA">
         <CLASSES>
@@ -428,5 +427,6 @@
         </SOURCES>
       </library>
     </orderEntry>
+    <orderEntry type="library" name="opencv-3.2.0-1" level="project" />
   </component>
 </module>

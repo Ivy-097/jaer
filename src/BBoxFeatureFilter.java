@@ -118,12 +118,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
      */
     public BBoxFeatureFilter(AEChip chip) throws ParserConfigurationException {
         super(chip);
-        apsDisplay = ImageDisplay.createOpenGLCanvas();
-        apsFrame = new JFrame("APS ArUco Detection Frame");
-        apsFrame.setPreferredSize(new Dimension(640,480));
-        apsFrame.getContentPane().add(apsDisplay, BorderLayout.CENTER);
-        apsFrame.pack();
-        apsFrame.setVisible(true);
     }
 
     @Override
@@ -136,7 +130,12 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         logger.info("width=" + CHIP_WIDTH + " height=" + CHIP_HEIGHT);
 
-        // tsBegin
+        apsDisplay = ImageDisplay.createOpenGLCanvas();
+        apsFrame = new JFrame("APS ArUco Detection Frame");
+        apsFrame.setPreferredSize(new Dimension(640,480));
+        apsFrame.getContentPane().add(apsDisplay, BorderLayout.CENTER);
+        apsFrame.pack();
+        apsFrame.setVisible(false);
 
         setBin_thresh(0.6f);
 
@@ -319,16 +318,25 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         Dictionary dic = Aruco.getPredefinedDictionary(Aruco.DICT_6X6_250);
         Aruco.detectMarkers(detectionInput, dic, corners, ids, parameters, rejected, cameraMatrix, distCoeff);
 
+        if (corners.isEmpty()) {
+            return in;
+        }
+
+        apsDisplay.repaint();
+
+        int ts = chip.getAeViewer().getAePlayer().getTime();
+
+        if (ts < previousTimestamp) {
+            previousTimestamp = ts;
+            return in;
+        }
+
         // Populate the pixmap
         for (int i = 0; i < CHIP_WIDTH; i++) {
             for (int j = 0; j < CHIP_HEIGHT; j++) {
                 apsDisplay.setPixmapGray(i,j,(float) CDSMat.get(i,j)[0]);
             }
         }
-
-        apsDisplay.repaint();
-
-        int ts = chip.getAeViewer().getAePlayer().getTime();
 
         if (ts != previousTimestamp) {
             Point currentOffset = new Point(0,0); // containing fallback offsets
@@ -396,14 +404,16 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
                 // log.info("Oldsquares:\n" + oldSquares.toString());
                 // log.info("Squares:\n" + squares.toString());
 
-                offsetX += currentOffset.x;
-                offsetY += currentOffset.y;
-                rotation = 0;
-
-                // save offsets to the hashtable
-                tsToOffset.put(ts,new Pair<dblPoint,Double>(new dblPoint(offsetX, offsetY), rotation));
-                dblPoint temp = new dblPoint(offsetX,offsetY);
-                // log.info("current offset: " + offsetX + ", " + offsetY + "\n" + "saved offset for " + ts + " : \n" + temp.x + ", " + temp.y);
+                if (ts > previousTimestamp) { // temporary fix for non-monotonic ts issue
+                    offsetX += currentOffset.x;
+                    offsetY += currentOffset.y;
+                    rotation = 0;
+                    // dblPoint temp = new dblPoint(offsetX,offsetY);
+                    // log.info("current offset: " + offsetX + ", " + offsetY + "\n" + "saved offset for " + ts + " : \n" + temp.x + ", " + temp.y);
+                    tsToOffset.put(ts,new Pair<dblPoint,Double>(new dblPoint(offsetX, offsetY), rotation));
+                } else {
+                    // maybe something here?
+                }
             }
         }
 
