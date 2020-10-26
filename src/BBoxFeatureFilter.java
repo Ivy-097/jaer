@@ -135,7 +135,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         apsFrame.setPreferredSize(new Dimension(640,480));
         apsFrame.getContentPane().add(apsDisplay, BorderLayout.CENTER);
         apsFrame.pack();
-        apsFrame.setVisible(false);
+        apsFrame.setVisible(true);
 
         setBin_thresh(0.6f);
 
@@ -268,7 +268,9 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     public EventPacket<?> filterPacket(EventPacket<?> in) {
         final ApsDvsEventPacket<?> packet = (ApsDvsEventPacket<?>) in;
 
-        apsDisplay.checkPixmapAllocation();
+        if (apsDisplay != null) {
+            apsDisplay.checkPixmapAllocation();
+        }
 
         if (packet.getEventClass() != ApsDvsEvent.class) {
             EventFilter.log.warning("wrong input event class, got " + packet.getEventClass() + " but we need to have " + ApsDvsEvent.class);
@@ -302,7 +304,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
                 float[] tempList = new float[3];
                 Arrays.fill(tempList,inv);
                 CDSMat.put(e.getX(), e.getY(), tempList);
-                // apsDisplay.setPixmapGray(e.getX(),e.getY(),scaled_val);
             }
         }
 
@@ -322,7 +323,8 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             return in;
         }
 
-        apsDisplay.repaint();
+        if (apsDisplay != null)
+            apsDisplay.repaint();
 
         int ts = chip.getAeViewer().getAePlayer().getTime();
 
@@ -350,7 +352,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
             if (tsToOffset.containsKey(ts)) { // there is already an entry for the timestamp
                 // Print of the next line in the first run of the data indicates that the bbox bouncing is caused by
-                System.out.println("up here! " + ts);
+                // System.out.println("up here! " + ts);
                 Pair<dblPoint,Double> saved = tsToOffset.get(ts);
                 dblPoint savedPoint = saved.getKey();
                 offsetX = (int) savedPoint.x;
@@ -445,7 +447,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         }
         gl.glEnd();
 
-        /*
         // Draw the bbox points of each object
         gl.glPointSize(8f);
         gl.glColor3f(0,0,1f);
@@ -459,16 +460,10 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             for (dblPoint p : obj) {
                 double x = p.x + offsetX;
                 double y = p.y + offsetY;
-                change the visible position of points
-                p.x = x*Math.cos(rotation) - y*Math.sin(rotation);
-                p.y = x*Math.sin(rotation) + y*Math.cos(rotation);
-                p.x = x;
-                p.y = y;
                 gl.glVertex2d(x,y);
             }
         }
         gl.glEnd();
-         */
 
         // draw bbox lines
         gl.glPointSize(3f);
@@ -480,12 +475,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
                 for (dblPoint p : obj) {
                     double x = p.x + offsetX;
                     double y = p.y + offsetY;
-                    /* change the visible position of points
-                p.x = x*Math.cos(rotation) - y*Math.sin(rotation);
-                p.y = x*Math.sin(rotation) + y*Math.cos(rotation);
-                p.x = x;
-                p.y = y;
-                 */
                     gl.glVertex2d(x,y);
                 }
             }
@@ -501,34 +490,22 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         }
         gl.glEnd();
 
-        /*
-        // Draw the loops that go through all the bbox points
-        gl.glLineWidth(2f);
-        gl.glColor3f(0,0,1f);
+        // Draw the loops that go through the pending object points
+        gl.glLineWidth(3f);
+        gl.glColor3f(0,1f,0);
         for (final BBoxObject obj : bboxList) {
             if (obj.getTimestamp() > ts) {
                 continue; // bbox doesn't exist yet
             }
 
             gl.glBegin(GL2.GL_LINE_LOOP);
-
-            for (final Point p : obj) {
-                double x = p.getX();
-                double y = p.getY();
-                vertexCalcMacro(gl,x,y);
+            gl.glBegin(GL2.GL_POINTS);
+            for (final dblPoint p : currBboxPoints) {
+                gl.glVertex2d(p.x,p.y);
             }
             gl.glEnd();
         }
         gl.glColor3f(0,1f,0);
-
-        gl.glBegin(GL2.GL_LINE_LOOP);
-        for (final Point p : currBboxPoints) {
-            double x = p.getX();
-            double y = p.getY();
-            vertexCalcMacro(gl,x,y);
-        }
-        gl.glEnd();
-         */
 
         gl.glPopMatrix();
     }
@@ -557,12 +534,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
     public void setBin_thresh(float val) {
         this.bin_thresh = val;
-        /*
-        float oldval = this.bin_thresh;
-        putFloat("bin_thresh",val);
-        this.bin_thresh = val;
-        support.firePropertyChange("bin_thresh",oldval,val);
-         */
     }
 
     public float getCDSoffset() {
@@ -582,7 +553,11 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             logger.warning("Latest bbox had less than 3 points. Discarding.");
         } else { // TODO: drastically reformulate this
             BBoxObject newPoints = new BBoxObject();
-            newPoints.addAll(currBboxPoints);
+
+            for (dblPoint point : currBboxPoints) {
+                newPoints.add(new dblPoint(point.x - offsetX, point.y - offsetY));
+            }
+
             newPoints.setTimestamp(chip.getAeViewer().getAePlayer().getTime());
             bboxList.add(newPoints);
             /*
