@@ -4,6 +4,8 @@ import com.jogamp.opengl.GL2;
 import com.jogamp.opengl.GLAutoDrawable;
 import eu.seebetter.ini.chips.DavisChip;
 import javafx.util.Pair;
+import net.sf.jaer.Description;
+import net.sf.jaer.DevelopmentStatus;
 import net.sf.jaer.chip.AEChip;
 import net.sf.jaer.event.ApsDvsEvent;
 import net.sf.jaer.event.ApsDvsEventPacket;
@@ -50,11 +52,13 @@ import static org.opencv.core.CvType.CV_8UC3;
 import static org.opencv.imgproc.Imgproc.THRESH_BINARY;
 import static org.opencv.imgproc.Imgproc.threshold;
 
-// TODO: Initial XML Parsing + Saving/Loading
-// NOTE: BBox drawing appears to be a bit shaky for now
-
-/* A class for testing and demonstrating bbox saving, loading, and transformation */
-
+/**
+ * Automatic annotation tool implemented through ArUco marker tracking
+ *
+ * @author Ayam Shrestha
+ */
+@Description("Automatic annotation tool implemented through ArUco marker tracking")
+@DevelopmentStatus(DevelopmentStatus.Status.Experimental)
 public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
     static {
@@ -79,23 +83,22 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     private JFrame apsFrame;
     private ImageDisplay apsDisplay;
     private float[] resetBuffer, signalBuffer; // flat-array colored representation
-
     private float[] CDSBuffer;
+    private Mat CDSMat; // OpenCV Mat for transfer into
+
     private float CDSoffset = 500; // CDS brightness value
-    private Mat CDSMat;
     private int MAX_ADC;
     private float bin_thresh;
 
     private ArrayList<Mat> corners = new ArrayList<>(); // list of Mats containing marker corner coords
     private Mat ids = new Mat();
-    private Map<Integer,Mat> squares = new HashMap<>(100000);
+    private Map<Integer,Mat> squares = new HashMap<>();
 
     private Mat cameraMatrix;
     private Mat distCoeff;
 
     private int previousTimestamp;
     private final ArrayList<BBoxObject> bboxList = new ArrayList<>();
-    // private final ArrayList<BBoxObject> visible = new ArrayList<>(); // box display array
     private final BBoxObject currBboxPoints = new BBoxObject();
     // private final Mat transform = Mat.eye(4,4, CvType.CV_8UC1); // the global transformation matrix at the current ts
 
@@ -103,8 +106,9 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     Map<Integer, Pair<dblPoint,Double>> tsToOffset = new HashMap<>();
     int offsetX;
     int offsetY;
-    double rotation; // rotation in radians
+    double rotation; // 2D rotation in radians (UNUSED)
 
+    // XML-related
     DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
     DocumentBuilder builder = factory.newDocumentBuilder();
 
@@ -114,10 +118,12 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     /**
      * Subclasses should call this super initializer
      *
-     * @param chip
+     * @param chip chip that we are filtering for
      */
     public BBoxFeatureFilter(AEChip chip) throws ParserConfigurationException {
         super(chip);
+        setPropertyTooltip("Detection", "CDSoffset", "The brightness value for pixels in extracted CDS frames");
+        setPropertyTooltip("Detection", "bin_thresh", "Binarization threshold for CDS frames as a ratio");
     }
 
     @Override
@@ -135,7 +141,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         apsFrame.setPreferredSize(new Dimension(640,480));
         apsFrame.getContentPane().add(apsDisplay, BorderLayout.CENTER);
         apsFrame.pack();
-        apsFrame.setVisible(true);
+        apsFrame.setVisible(false);
 
         setBin_thresh(0.6f);
 
@@ -158,7 +164,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         cameraMatrix.put(1,1, 4.837252805142607031e+02);
         cameraMatrix.put(1,2, 1.234739411993485589e+02);
         cameraMatrix.put(2, 2, 1.0);
-        double[] temp = new double[]{
+        double[] temp = new double[]{ // values for distCoeff
                 2.303407800133863703e-01,
                 -4.906656853722137335e+00,
                 1.437253645436794387e-03,
@@ -194,14 +200,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
             // TODO: get rewind detection working
             // general property change event manager
-            chip.getAeViewer().addPropertyChangeListener(propertyChangeEvent -> {
-                logger.info(propertyChangeEvent.getPropertyName() + " " + propertyChangeEvent.getNewValue());
-                switch (propertyChangeEvent.getPropertyName()) {
-                    case AEPlayer.EVENT_FILEOPEN:
-                        tsBegin = aePlayer.getFirstTimestamp();
-                        System.out.println("tsBegin = " + tsBegin);
-                }
-            });
 
             theCanvas.getCanvas().addMouseListener(new MouseListener() {
                 @Override
@@ -266,6 +264,13 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
     @Override
     public EventPacket<?> filterPacket(EventPacket<?> in) {
+        // there could be a more elegant fix for this
+        if (CHIP_HEIGHT < 0) {
+            logger.warning("CHIP_HEIGHT < 0; looks like initialization did not occur. attempting reinitialization.");
+            initFilter();
+            return null;
+        }
+
         final ApsDvsEventPacket<?> packet = (ApsDvsEventPacket<?>) in;
 
         if (apsDisplay != null) {
@@ -307,11 +312,12 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             }
         }
 
-        // standard OpenCV ArUco detection
+        // input thresholding
         threshold(CDSMat, CDSMat, bin_thresh, MAX_ADC, THRESH_BINARY);
+
+        // standard OpenCV ArUco detection
         Mat detectionInput = CDSMat.clone();
         detectionInput.convertTo(detectionInput, CV_8UC3);
-
         corners = new ArrayList<>();
         ids = new Mat();
         DetectorParameters parameters = DetectorParameters.create();
@@ -344,23 +350,12 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             Point currentOffset = new Point(0,0); // containing fallback offsets
             double angle = 0;
 
-            // TODO (BUG): By using the hashtable to store the offsets statically, the
-            // calculated values start bouncing around when markers appear into the frame
-            // The positive section of the if block appears to be called every second,
-            // regardless of the actual timestamp. Probably something to do with the
-            // annotate function?
-
             if (tsToOffset.containsKey(ts)) { // there is already an entry for the timestamp
-                // Print of the next line in the first run of the data indicates that the bbox bouncing is caused by
-                // System.out.println("up here! " + ts);
                 Pair<dblPoint,Double> saved = tsToOffset.get(ts);
                 dblPoint savedPoint = saved.getKey();
                 offsetX = (int) savedPoint.x;
                 offsetY = (int) savedPoint.y;
-                // rotation = saved.getValue(); // get saved rotation
-                // log.info("found stored offset at " + ts + "\n" + saved.x + ", " + saved.y);
             } else { // calculate offset and store it for this timestamp
-                // log.info("no stored offset at " + ts);
                 if (corners != null && !corners.isEmpty()) { // corners is non-zero
                     ArrayList<Integer> idList = new ArrayList<>();
                     // populate the new ID list
@@ -381,9 +376,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
                         int id = idList.get(i); // IDs have the same ordering as the markers
                         Mat current = corners.get(i); // current marker square
                         Mat old = squares.get(id);
-                        // logger.info("Adding square #" + id + " to squares");
 
-                        // TODO: get rotation detection working
                         if (old != null) {
                             currentOffset.x = (int)(current.get(0,0)[1] - old.get(0,0)[1]);
                             currentOffset.y = (int)(current.get(0,0)[0] - old.get(0,0)[0]);
@@ -392,29 +385,18 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
                             double dist = getDistance(topLeft,topRight); // Euclidean distance
                             double sinVal = (topRight[0] - topLeft[0]) * dist;
                             angle = (topRight[1] >= topLeft[1]) ? Math.asin(sinVal) : Math.PI - Math.asin(sinVal);
-                        } else {
-                            // System.out.println("inserting new marker: id=" + id + " (" + current.get(0,1)[1] + " " + current.get(0,1)[0] + ")");
                         }
                         // insert marker using its id
                         // marker will be present for the next iteration if it is currently null
                         squares.put(id,current);
                     }
-                } else {
-                    // nothing? manage branching effects?
                 }
 
-                // log.info("Oldsquares:\n" + oldSquares.toString());
-                // log.info("Squares:\n" + squares.toString());
-
-                if (ts > previousTimestamp) { // temporary fix for non-monotonic ts issue
+                if (ts > previousTimestamp) { // fix for non-monotonic ts issue
                     offsetX += currentOffset.x;
                     offsetY += currentOffset.y;
                     rotation = 0;
-                    // dblPoint temp = new dblPoint(offsetX,offsetY);
-                    // log.info("current offset: " + offsetX + ", " + offsetY + "\n" + "saved offset for " + ts + " : \n" + temp.x + ", " + temp.y);
                     tsToOffset.put(ts,new Pair<dblPoint,Double>(new dblPoint(offsetX, offsetY), rotation));
-                } else {
-                    // maybe something here?
                 }
             }
         }
@@ -426,8 +408,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
     @Override
     public void annotate(@NotNull GLAutoDrawable drawable) {
-        // TODO: it appears that it is not possible to use ArrayList operations between glBegin() and glEnd(); most likely because of thread safety
-        // change it to Vector to see if it allows it to occur.
         int ts = chip.getAeViewer().getAePlayer().getTime();
 
         GL2 gl = drawable.getGL().getGL2();
@@ -442,8 +422,7 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         gl.glColor3f(0,1f,1f);
         gl.glBegin(GL2.GL_POINTS);
         for (Mat current : corners) {
-            // top-left. coords are flipped ???
-            gl.glVertex2d(current.get(0, 0)[1], current.get(0, 0)[0]);
+            gl.glVertex2d(current.get(0, 0)[1], current.get(0, 0)[0]); // coords are (y,x)
         }
         gl.glEnd();
 
@@ -510,11 +489,9 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         gl.glPopMatrix();
     }
 
-    /*
-    public void doClearVisibleBboxPoints() {
-        visible.clear();
+    public void doToggleDetectionFrame() {
+        apsFrame.setVisible(!apsFrame.isVisible());
     }
-     */
 
     public void doEmptyCalculatedOffsets() {
         tsToOffset.clear();
@@ -524,22 +501,80 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         rotation = 0;
     }
 
+    /**
+     * Clear the corners ArrayList, effectively flushing the current marker detection.
+     */
     public void doFlushDetectedSquares() {
-        corners = new ArrayList<>();
+        corners.clear();
     }
 
+    /**
+     * Clear the corners ArrayList, effectively flushing the current marker detection.
+     *
+     * @return the binarization threshold value
+     */
     public float getBin_thresh() {
         return this.bin_thresh;
     }
 
+    /**
+     * Bin_thresh setter
+     *
+     * @param val   new float value for the binarization threshold
+     */
     public void setBin_thresh(float val) {
         this.bin_thresh = val;
     }
 
+    /**
+     * Min bin_thresh getter
+     *
+     * @return minimum binarization threshold for CDS frames
+     */
+    public float getMinBin_thresh() {
+        return 0.0f;
+    }
+
+    /**
+     * Max bin_thresh getter
+     *
+     * @return maximum binarization threshold for CDS frames
+     */
+    public float getMaxBin_thresh() {
+        return 1.0f;
+    }
+
+    /**
+     * Min CDSoffset getter
+     *
+     * @return minimum brightness offset value for CDS frames
+     */
+    public float getMinCDSoffset() {
+        return 0; // could also be -MAX_ADC
+    }
+
+    /**
+     * Max CDSoffset getter
+     *
+     * @return maximum brightness offset value for CDS frames
+     */
+    public float getMaxCDSoffset() {
+        return MAX_ADC;
+    }
+
+    /**
+     * Current CDSoffset getter
+     *
+     * @return brightness offset value for CDS frames
+     */
     public float getCDSoffset() {
         return this.CDSoffset;
     }
 
+    /** CDS offset setter
+     *
+     * @param val   new CDS frame brightness value
+     */
     public void setCDSoffset(float val) {
         float oldval = this.CDSoffset;
         putFloat("offset_x",val);
@@ -548,10 +583,13 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         chip.getCanvas().paintFrame(); // force-paint the frame
     }
 
+    /**
+     * Saves the currently drawn object to the list of existing bboxes
+     */
     public void doSaveAsNewObject() {
-        if (currBboxPoints.size() < 3) {
+        if (currBboxPoints.size() < 3) { // object does not form a polygon
             logger.warning("Latest bbox had less than 3 points. Discarding.");
-        } else { // TODO: drastically reformulate this
+        } else {
             BBoxObject newPoints = new BBoxObject();
 
             for (dblPoint point : currBboxPoints) {
@@ -560,18 +598,16 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
             newPoints.setTimestamp(chip.getAeViewer().getAePlayer().getTime());
             bboxList.add(newPoints);
-            /*
-            newPoints = new BBoxObject();
-            newPoints.addAll(currBboxPoints);
-            newPoints.setTimestamp(chip.getAeViewer().getAePlayer().getTime());
-            visible.add(newPoints);
-             */
         }
 
         currBboxPoints.clear();
         chip.getCanvas().paintFrame(); // force-paint the frame
     }
 
+    /**
+     * Experimental function for saving structures to XML. Incomplete.
+     * @throws TransformerException XML-related exception
+     */
     public void doSaveToFile() throws TransformerException {
         Document doc = builder.newDocument();
         Charset charset = StandardCharsets.UTF_8;
@@ -584,21 +620,26 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         Element thing = doc.createElement("objectlist");
         root.appendChild(thing);
 
-
         TransformerFactory transformerFactory = TransformerFactory.newInstance();
         Transformer transformer = transformerFactory.newTransformer();
 
         DOMSource source = new DOMSource(doc);
+        // saving
         StreamResult result = new StreamResult(new File("./froot-files/target.xml"));
         transformer.transform(source, result);
     }
 
+    /**
+     * Clears the current list of bounding box objects
+     */
     public void doClearBboxPoints() {
         bboxList.clear();
         chip.getCanvas().paintFrame(); // force-paint the frame
     }
 
-    // Probably need simple bounds checking in here some day
+    /**
+     * Experimental function for loading structures from XML. Working implementation. Needs Extension
+     */
     public void doOpenFrootsFile() {
         JFileChooser chooser = new JFileChooser();
         InputStream inputStream;
@@ -606,7 +647,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
         doClearBboxPoints();
 
-        /*
         int retVal = chooser.showOpenDialog(null);
 
         if (retVal == JFileChooser.APPROVE_OPTION) {
@@ -615,9 +655,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
             logger.warning("Selected file could not be opened!");
             return;
         }
-        */
-
-        file = new File("./froot-files/bboxprototype.xml");
 
         try {
             inputStream = new FileInputStream(file);
@@ -678,7 +715,11 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         }
     }
 
-    // Doesn't validate input -- could get ugly
+    /**
+     * Utility function for XML saving and loading
+     * @param coords String containing point coordinates in the form (x,y)
+     * @return dblPoint point structure containing the extracted coordinates
+     */
     private dblPoint parseCoordinates(String coords) {
         dblPoint p = new dblPoint(-1,-1);
 
@@ -693,6 +734,11 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
         return p;
     }
 
+    /** Euclidean distance function for pixels
+     * @param p0 first point
+     * @param p1 second point
+     * @return float distance between p0 and p1 in pixels
+     */
     private double getDistance(double[] p0, double[] p1) {
         // Note that OpenCV has y and x as the first and second coordinates, respectively,
         // but the order does not matter in the calculation of the Euclidean distance.
