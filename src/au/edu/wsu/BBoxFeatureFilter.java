@@ -1,5 +1,5 @@
-import au.edu.wsu.BBoxObject;
-import au.edu.wsu.dblPoint;
+package au.edu.wsu;
+
 import com.jogamp.opengl.GL2;
 import com.jogamp.opengl.GLAutoDrawable;
 import eu.seebetter.ini.chips.DavisChip;
@@ -244,7 +244,6 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
 
                 @Override
                 public void mouseEntered(MouseEvent mouseEvent) {
-                    // OPTIONAL: Probably show coordinates by drawing on the canvas or via a tooltip
                 }
 
                 @Override
@@ -748,6 +747,4 @@ public class BBoxFeatureFilter extends EventFilter2D implements FrameAnnotater {
     private int getIndex(final int x, final int y) {
         return (y * CHIP_WIDTH) + x;
     }
-
-
 }

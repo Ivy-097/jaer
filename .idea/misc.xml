@@ -8,7 +8,7 @@
         <option name="sourcesTypes" value="source, src, sources, srcs" />
       </ArtifactTypeSettings>
     </option>
-    <option name="ivyLogLevelThreshold" value="Info" />
+    <option name="ivyLogLevelThreshold" value="Verbose" />
     <option name="ivySettingsFile" value="$PROJECT_DIR$/ivysettings.xml" />
   </component>
   <component name="ProjectRootManager" version="2" languageLevel="JDK_1_8" default="false" project-jdk-name="1.8" project-jdk-type="JavaSDK">
